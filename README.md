@@ -96,6 +96,8 @@ Copy `skills/what-changed/` into your agent's skills folder. Most people want th
 | Qwen Code | `.qwen/skills/what-changed/` |
 | Claude.ai | zip the folder, then Customize → Skills → Upload (code execution must be on) |
 
+Claude Code can also load the whole repository as a plugin (it has a `.claude-plugin/plugin.json`): clone it and start Claude Code with `claude --plugin-dir /path/to/what-changed`. That lasts one session; the skill is then `what-changed:what-changed`, and its scripts are in the clone's `skills/what-changed/scripts/`.
+
 ## Operating systems
 
 | OS | Status |
@@ -117,7 +119,7 @@ On Windows, use `py -3` (or `python`) where this README says `python3`.
 
 ## Results
 
-On 27 items with known answers, the skill caught every change and quoted its sources more reliably than a plain agent with the same tools, at a higher cost: about 5.7 times the input tokens and 4.6 times the time.
+On 27 items with known answers, the skill and a plain agent with the same tools scored close on accuracy (1.94 and 1.87 on a 0–2 scale; no significance test was run on that gap). The skill quoted a source on more items, partly because it was given a source list, and it cost more: about 5.7 times the input tokens and 4.6 times the time. One small test does not show that the skill is better than a plain agent.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/benchmark-dark.svg">

@@ -567,12 +567,46 @@ class SecurityTests(unittest.TestCase):
             self.assertIsNone(net.refused("https://93.184.215.14/"))
             self.assertIsNone(net.refused("https://[2606:2800:21f:cb07:6820:80da:af6b:8b2c]/"))
 
-    def test_behind_a_proxy_names_are_left_to_the_proxy(self):
+    LOCAL_ANSWERS = ["192.168.0.9", "10.1.2.3", "172.16.0.1", "127.0.0.1", "169.254.169.254",
+                     "::1", "fe80::1%en0", "fd00::7", "::ffff:10.0.0.1"]
+
+    def resolving_to(self, address: str, proxies: dict):
+        family = socket.AF_INET6 if ":" in address else socket.AF_INET
+        return [mock.patch("urllib.request.getproxies", return_value=proxies),
+                mock.patch("urllib.request.proxy_bypass", return_value=False),
+                mock.patch("socket.getaddrinfo", return_value=[(family, 1, 6, "", (address, 0))])]
+
+    def test_names_resolving_to_local_addresses_are_refused_with_and_without_proxy(self):
+        """A proxy must not open the way to the LAN: the name is resolved and checked anyway."""
+        for proxies in ({}, {"https": "http://127.0.0.1:9", "http": "http://127.0.0.1:9"}):
+            for address in self.LOCAL_ANSWERS:
+                with self.subTest(proxy=bool(proxies), address=address):
+                    patches = self.resolving_to(address, proxies)
+                    with patches[0], patches[1], patches[2]:
+                        self.assertIn("private", net.refused("https://intranet.example/") or "")
+                        self.assertIn("private", net.refused("http://intranet.example/") or "")
+
+    def test_behind_a_proxy_unresolvable_names_are_left_to_the_proxy(self):
+        """Inside a sandbox local DNS often fails; the proxy resolves the name then."""
         with mock.patch("urllib.request.getproxies", return_value={"https": "http://127.0.0.1:9"}), \
              mock.patch("urllib.request.proxy_bypass", return_value=False), \
-             mock.patch("socket.getaddrinfo", side_effect=AssertionError("must not resolve")):
+             mock.patch("socket.getaddrinfo", side_effect=socket.gaierror(8, "not known")):
             self.assertIsNone(net.refused("https://example.com/"))
             self.assertIsNotNone(net.refused("https://127.0.0.1/"))
+            self.assertIsNotNone(net.refused("https://169.254.169.254/"))
+            self.assertIsNotNone(net.refused("https://localhost/"))
+
+    def test_behind_a_proxy_public_and_fake_ip_answers_pass(self):
+        """Public answers pass; so do the stand-in answers (198.18.0.0/15) of fake-ip proxy apps."""
+        proxies = {"https": "http://127.0.0.1:9"}
+        for address in ["93.184.215.14", "2606:2800:21f:cb07:6820:80da:af6b:8b2c", "198.18.0.5", "198.19.255.1"]:
+            with self.subTest(address=address):
+                patches = self.resolving_to(address, proxies)
+                with patches[0], patches[1], patches[2]:
+                    self.assertIsNone(net.refused("https://example.com/"))
+        patches = self.resolving_to("198.18.0.5", {})
+        with patches[0], patches[1], patches[2]:
+            self.assertIsNotNone(net.refused("https://example.com/"))  # without a proxy we connect there
 
     def test_every_redirect_hop_is_checked(self):
         import urllib.request as ur
@@ -1467,6 +1501,22 @@ class RunLoggingTests(unittest.TestCase):
                 guard = text.index("if sys.version_info < (3, 11):")
                 self.assertLess(guard, text.find("sys.path.insert") if "sys.path.insert" in text else len(text),
                                 "the check must run before the skill's own modules are imported")
+
+
+
+class PluginManifestTests(unittest.TestCase):
+    """The repository loads as a Claude Code plugin; its manifest must agree with the skill."""
+
+    def test_plugin_manifest_matches_the_skill(self):
+        manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        skill = (ROOT / "skills" / "what-changed" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertEqual(manifest["name"], "what-changed")
+        self.assertIn(f"name: {manifest['name']}\n", skill)
+        self.assertIn(f'version: "{manifest["version"]}"', skill)
+        self.assertEqual(manifest["license"], "MIT")
+        for key in ("skills", "hooks", "mcpServers", "commands", "agents"):
+            self.assertNotIn(key, manifest, "the plugin adds the skill only; hooks stay opt-in (adapters/)")
+        self.assertFalse((ROOT / "hooks").exists(), "a hooks/ folder at the root would load as plugin hooks")
 
 
 if __name__ == "__main__":

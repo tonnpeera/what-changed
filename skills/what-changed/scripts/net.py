@@ -7,6 +7,9 @@
   outside any sandbox, so a watched page must not be able to reach the user's LAN.
   Without a proxy the connection goes to an address checked at connect time, so a
   name cannot pass the check and then resolve to a private address (DNS rebinding).
+  Behind a proxy, a name is still resolved here when local DNS answers and refused if
+  it points to a private, loopback or link-local address; the proxy resolves it again,
+  so rebinding is not prevented there.
 - If WHAT_CHANGED_ALLOWED_HOSTS is set (the schedulers in adapters/ set it for the
   agent), only those hosts are fetched, so an agent fed instructions by a web page
   cannot use these scripts to send data to any other host.
@@ -94,6 +97,15 @@ def _private_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return not ip.is_global
 
 
+# Proxy apps in "fake-ip" mode answer every name with an address from 198.18.0.0/15 and
+# resolve the real one themselves, so behind a proxy that range says nothing about the target.
+FAKE_IP = ipaddress.IPv4Network("198.18.0.0/15")
+
+
+def _private_behind_proxy(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return _private_ip(ip) and not (isinstance(ip, ipaddress.IPv4Address) and ip in FAKE_IP)
+
+
 def _allowed_hosts() -> list[str] | None:
     """WHAT_CHANGED_ALLOWED_HOSTS as a list; None means no limit (unset or "*")."""
     value = os.environ.get("WHAT_CHANGED_ALLOWED_HOSTS")
@@ -110,8 +122,9 @@ def _host_allowed(host: str, allowed: list[str]) -> bool:
 
 def refused(url: str) -> str | None:
     """Why this URL must not be fetched, or None. Checked before the request and on every
-    redirect. Behind a proxy (e.g. a sandbox) DNS may not resolve locally, so names are
-    resolved only when no proxy applies; literal addresses and localhost are always refused."""
+    redirect. Literal addresses and localhost are always refused, and names are resolved and
+    refused if any answer is private, with or without a proxy. Behind a proxy (e.g. a sandbox)
+    local DNS may not answer at all; the name is then left to the proxy."""
     try:
         parts = urllib.parse.urlsplit(url)
     except ValueError:
@@ -149,16 +162,17 @@ def refused(url: str) -> str | None:
     if host == "localhost" or host.endswith(".localhost") or NUMERIC_HOST.fullmatch(host):
         return f"refused: local or numeric host {host}"
     proxies = urllib.request.getproxies()
-    if proxies.get(parts.scheme) and not urllib.request.proxy_bypass(host):
-        return None
+    via_proxy = bool(proxies.get(parts.scheme)) and not urllib.request.proxy_bypass(host)
     try:
         infos = socket.getaddrinfo(host, None)
     except (socket.gaierror, UnicodeError):
-        return None  # urlopen reports the DNS failure itself
-    # An early, clear answer. The connection itself resolves and checks again and connects only
-    # to the address it checked (_pinned_connection), so a second answer cannot slip through.
+        return None  # urlopen (or the proxy) reports the DNS failure itself
+    # An early, clear answer. Without a proxy the connection itself resolves and checks again and
+    # connects only to the address it checked (_pinned_connection), so a second answer cannot slip
+    # through. Behind a proxy this check is the only one: the proxy connects wherever it resolves.
+    private = _private_behind_proxy if via_proxy else _private_ip
     for info in infos:
-        if _private_ip(ipaddress.ip_address(str(info[4][0]).split("%")[0])):
+        if private(ipaddress.ip_address(str(info[4][0]).split("%")[0])):
             return f"refused: {host} resolves to a private address"
     return None
 

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- macOS launchd job: runs daily at 07:00 (pick a time before you usually start work). If the Mac is asleep at 07:00,
+     launchd runs the job once when it wakes. Copy to ~/Library/LaunchAgents/,
+     edit the paths, then: launchctl load ~/Library/LaunchAgents/com.example.what-changed.plist
+     run-daily.sh runs ~/.local/bin/claude (where Claude Code's installer puts it) if it exists, else
+     the first claude on PATH, and checks its version before every run; to use another one, add
+     WHAT_CHANGED_CLAUDE with its full path (command -v claude). Messages go to the log file below. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.example.what-changed</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/path/to/skills/what-changed/adapters/scheduler-cron/run-daily.sh</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>WHAT_CHANGED_PROJECT</key><string>/path/to/your/project</string>
+    <key>WHAT_CHANGED_HOST</key><string>claude</string>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key><string>/path/to/home/Library/Logs/what-changed.log</string>
+  <key>StandardErrorPath</key><string>/path/to/home/Library/Logs/what-changed.log</string>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>0</integer></dict>
+</dict>
+</plist>

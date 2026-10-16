@@ -1,0 +1,15 @@
+# what-changed watchlist. One entry per topic.
+# Fields are explained in references/ledger-format.md.
+topics:
+  - id: example-topic
+    question: "What changed about <thing> that matters to me?"
+    sources:
+      - https://example.com/changelog
+      - https://example.com/feed.xml
+    cadence: daily            # daily | weekly | monthly
+    counts_as_change: "new release, price change, deprecation, policy change"
+    mode: light               # light | full
+    budget: { pages: 5, searches: 4 }
+    recheck_low: true
+    region: global            # ISO country code (DE, JP, BR…) or global
+    languages: [en]

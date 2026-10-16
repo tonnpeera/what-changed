@@ -1,0 +1,29 @@
+# Example watchlist.
+topics:
+  - id: claude-code-updates
+    question: "What changed in Claude Code and the Claude API/models that affects how people use them?"
+    sources:
+      - https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md
+      - https://github.com/anthropics/claude-code/releases
+      - https://platform.claude.com/docs/en/release-notes/overview
+    cadence: daily
+    counts_as_change: "new Claude Code version with user-visible features, new or retired models, price or limit changes, policy dates"
+    mode: light
+    budget: { pages: 5, searches: 4 }
+    recheck_low: true
+    region: global
+    languages: [en]
+
+  - id: agent-skills-adoption
+    question: "Which agent products support the Agent Skills (SKILL.md) open standard, and where do they look for skills?"
+    sources:
+      - https://agentskills.io/clients
+      - https://github.com/agentskills/agentskills/commits/main.atom
+      - https://agentskills.io/this-page-was-removed
+    cadence: weekly
+    counts_as_change: "a product adds or drops support, a change in discovery paths, a change to the specification's required fields"
+    mode: full
+    budget: { pages: 8, searches: 6 }
+    recheck_low: true
+    region: global
+    languages: [en]

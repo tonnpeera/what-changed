@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "name": "what-changed catch-up", "command": "python3 \"/path/to/skills/what-changed/scripts/catch_up.py\" --store \"/path/to/uptodate\" --format gemini", "timeout": 10000 }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "store": "examples/codex-run-2/uptodate",
+  "must_list_could_not_check": [
+    "https://agentskills.io/this-page-was-removed"
+  ]
+}

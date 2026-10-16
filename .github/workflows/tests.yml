@@ -1,0 +1,53 @@
+# Offline checks on Linux, Windows and macOS. No secrets, no API keys, no model calls:
+# the unit tests mock every network fetch and use a stand-in for the agent CLI.
+# Each action is pinned to the full commit SHA of the release named in the comment.
+name: tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.11", "3.15"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Skill format check
+        run: python evals/check_skill.py skills/what-changed
+      - name: shellcheck (bash scripts)
+        if: runner.os == 'Linux' && matrix.python == '3.15'
+        run: |
+          command -v shellcheck || { sudo apt-get update && sudo apt-get install -y shellcheck; }
+          shellcheck skills/what-changed/adapters/scheduler-cron/run-daily.sh evals/try-host.sh
+      - name: run-daily.ps1 parses in Windows PowerShell 5.1
+        if: runner.os == 'Windows' && matrix.python == '3.15'
+        shell: powershell
+        run: |
+          $errors = $null
+          $file = Join-Path $PWD 'skills\what-changed\adapters\scheduler-windows\run-daily.ps1'
+          [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Host $_ }; exit 1 }
+          "PowerShell $($PSVersionTable.PSVersion): no syntax errors"
+      - name: run-daily.ps1 parses in PowerShell 7
+        if: runner.os == 'Windows' && matrix.python == '3.15'
+        shell: pwsh
+        run: |
+          $errors = $null
+          $file = Join-Path $PWD 'skills\what-changed\adapters\scheduler-windows\run-daily.ps1'
+          [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Host $_ }; exit 1 }
+          "PowerShell $($PSVersionTable.PSVersion): no syntax errors"

@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="940" height="430" viewBox="0 0 940 430" role="img" aria-labelledby="title desc">
+<title id="title">Benchmark: what-changed skill versus a plain agent</title>
+<desc id="desc">Bar chart from docs/benchmark.md. Quality, higher is better, skill versus plain agent: changes caught 18 of 18 versus 17 of 18; current value right 16 of 18 versus 15 of 18; unchanged items left alone 9 of 9 versus 8 of 9; quotes found on the cited page 47 of 47 versus 24 of 26; preferred by both judges on 13 versus 3 of the 16 items that were not ties. Cost, lower is better: input tokens per item about 507 thousand versus 89 thousand, 5.7 times; minutes per topic 4.6 versus 1.0, 4.6 times.</desc>
+<rect width="100%" height="100%" fill="#0d1117"/>
+<text x="470.0" y="30" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" font-weight="600" fill="#f0f6fc" text-anchor="middle">Skill vs. plain agent on 27 items (Claude Sonnet, same tools)</text>
+<rect x="20" y="50" width="560" height="360" rx="6" fill="#151b23" stroke="#3d444d"/>
+<rect x="600" y="50" width="320" height="360" rx="6" fill="#151b23" stroke="#3d444d"/>
+<text x="34" y="78" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#f0f6fc" text-anchor="start">Quality</text>
+<text x="118" y="78" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#9198a1" text-anchor="start">higher is better</text>
+<text x="614" y="78" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" font-weight="600" fill="#f0f6fc" text-anchor="start">Cost</text>
+<text x="660" y="78" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#9198a1" text-anchor="start">lower is better</text>
+<rect x="300" y="66" width="12" height="12" rx="2" fill="#4493f8"/>
+<text x="318" y="77" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#f0f6fc" text-anchor="start">what-changed</text>
+<rect x="420" y="66" width="12" height="12" rx="2" fill="#6e7681"/>
+<text x="438" y="77" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#f0f6fc" text-anchor="start">plain agent</text>
+<text x="34" y="115" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#f0f6fc" text-anchor="start">Changes caught</text>
+<rect x="250" y="100" width="270" height="12" rx="2" fill="#3d444d" opacity="0.5"/>
+<rect x="250" y="100" width="270.0" height="12" rx="2" fill="#4493f8"/>
+<text x="528" y="111" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#9198a1" text-anchor="start">18/18</text>
+<rect x="250" y="116" width="270" height="12" rx="2" fill="#3d444d" opacity="0.5"/>
+<rect x="250" y="116" width="255.0" height="12" rx="2" fill="#6e7681"/>
+<text x="528" y="127" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#9198a1" text-anchor="start">17/18</text>
+<text x="34" y="173" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#f0f6fc" text-anchor="start">Current value right</text>
+<rect x="250" y="158" width="270" height="12" rx="2" fill="#3d444d" opacity="0.5"/>
+<rect x="250" y="158" width="240.0" height="12" rx="2" fill="#4493f8"/>
+<text x="528" y="169" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#9198a1" text-anchor="start">16/18</text>
+<rect x="250" y="174" width="270" height="12" rx="2" fill="#3d444d" opacity="0.5"/>
+<rect x="250" y="174" width="225.0" height="12" rx="2" fill="#6e7681"/>
+<text x="528" y="185" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#9198a1" text-anchor="start">15/18</text>
+<text x="34" y="231" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#f0f6fc" text-anchor="start">Unchanged items left alone</text>
+<rect x="250" y="216" width="270" height="12" rx="2" fill="#3d444d" opacity="0.5"/>
+<rect x="250" y="216" width="270.0" height="12" rx="2" fill="#4493f8"/>
+<text x="528" y="227" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#9198a1" text-anchor="start">9/9</text>
+<rect x="250" y="232" width="270" height="12" rx="2" fill="#3d444d" opacity="0.5"/>
+<rect x="250" y="232" width="240.0" height="12" rx="2" fill="#6e7681"/>
+<text x="528" y="243" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#9198a1" text-anchor="start">8/9</text>
+<text x="34" y="289" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#f0f6fc" text-anchor="start">Quotes found on the cited page</text>
+<rect x="250" y="274" width="270" height="12" rx="2" fill="#3d444d" opacity="0.5"/>
+<rect x="250" y="274" width="270.0" height="12" rx="2" fill="#4493f8"/>
+<text x="528" y="285" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#9198a1" text-anchor="start">47/47</text>
+<rect x="250" y="290" width="270" height="12" rx="2" fill="#3d444d" opacity="0.5"/>
+<rect x="250" y="290" width="249.2" height="12" rx="2" fill="#6e7681"/>
+<text x="528" y="301" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#9198a1" text-anchor="start">24/26</text>
+<text x="34" y="347" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#f0f6fc" text-anchor="start">Preferred by both judges</text>
+<rect x="250" y="332" width="270" height="12" rx="2" fill="#3d444d" opacity="0.5"/>
+<rect x="250" y="332" width="219.4" height="12" rx="2" fill="#4493f8"/>
+<text x="528" y="343" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#9198a1" text-anchor="start">13/16</text>
+<rect x="250" y="348" width="270" height="12" rx="2" fill="#3d444d" opacity="0.5"/>
+<rect x="250" y="348" width="50.6" height="12" rx="2" fill="#6e7681"/>
+<text x="528" y="359" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#9198a1" text-anchor="start">3/16</text>
+<text x="34" y="382" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#9198a1" text-anchor="start">Out of: 18 changed items (first two rows) · 9 unchanged items · checkable quotes</text>
+<text x="34" y="398" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#9198a1" text-anchor="start">· 16 items on which both judges preferred one side (11 ties)</text>
+<text x="614" y="104" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#f0f6fc" text-anchor="start">Input tokens per item</text>
+<rect x="614" y="114" width="220.0" height="16" rx="2" fill="#4493f8"/>
+<text x="840.0" y="127" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#9198a1" text-anchor="start">507k</text>
+<rect x="614" y="136" width="38.6" height="16" rx="2" fill="#6e7681"/>
+<text x="658.6193293885601" y="149" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#9198a1" text-anchor="start">89k</text>
+<text x="614" y="176" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f0f6fc" text-anchor="start">what-changed: 5.7× the plain agent</text>
+<text x="614" y="224" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13" font-weight="normal" fill="#f0f6fc" text-anchor="start">Minutes per topic</text>
+<rect x="614" y="234" width="220.0" height="16" rx="2" fill="#4493f8"/>
+<text x="840.0" y="247" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#9198a1" text-anchor="start">4.6 min</text>
+<rect x="614" y="256" width="47.8" height="16" rx="2" fill="#6e7681"/>
+<text x="667.8260869565217" y="269" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="normal" fill="#9198a1" text-anchor="start">1 min</text>
+<text x="614" y="296" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f0f6fc" text-anchor="start">what-changed: 4.6× the plain agent</text>
+<text x="614" y="360" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#9198a1" text-anchor="start">Most input tokens are cache reads,</text>
+<text x="614" y="376" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" font-weight="normal" fill="#9198a1" text-anchor="start">billed at a fraction of normal input.</text>
+</svg>

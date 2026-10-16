@@ -1,0 +1,85 @@
+# Daily what-changed run on GitHub Actions; commits the store back, so git history
+# is the history of what you knew and when.
+# Needs: the skill at .claude/skills/what-changed/ in this repo, an uptodate/ folder, and a
+# repository secret: ANTHROPIC_API_KEY, or CLAUDE_CODE_OAUTH_TOKEN (swap the commented line).
+# GitHub disables schedules in public repos after 60 days without activity.
+#
+# Security: the agent reads untrusted web pages. It gets no git credentials
+# (persist-credentials: false), may edit only the ledgers and digests (not topics.yaml; runs.log
+# lines come from log_run.py, stamped from the clock),
+# may fetch only the hosts in topics.yaml plus the WHAT_CHANGED_FETCH_DOMAINS repository variable
+# (comma-separated, "*.example.com" for subdomains, "*" for any host), may run only four of the
+# skill's scripts (dontAsk denies everything else), and a separate step commits only the store
+# files, refusing if anything else changed, with git hooks disabled. It can read the whole checkout,
+# so keep the store in a repository that holds nothing private.
+# Both actions are pinned to a full commit SHA (checked 2026-10-14), so a moved tag cannot
+# change the code that receives your API key. Update the SHAs yourself from each action's
+# releases page when you want a newer version.
+name: what-changed
+on:
+  schedule:
+    - cron: "0 0 * * *"   # 00:00 UTC daily; change to suit your timezone
+  workflow_dispatch: {}
+permissions:
+  contents: write
+  id-token: write   # used by claude-code-action's default GitHub App authentication
+concurrency: what-changed
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Precheck (no model; a quiet day ends here)
+        id: precheck
+        run: |
+          set +e
+          python3 .claude/skills/what-changed/scripts/precheck.py --store uptodate
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+      - name: Hosts the agent may fetch
+        id: allow
+        if: steps.precheck.outputs.code == '10' || steps.precheck.outputs.code == '2'
+        env:
+          EXTRA: ${{ vars.WHAT_CHANGED_FETCH_DOMAINS }}
+        run: |
+          OUT="$(python3 .claude/skills/what-changed/scripts/hosts.py --store uptodate --allow "$EXTRA")"
+          FETCH="$(printf '%s\n' "$OUT" | sed -n 2p)"
+          echo "hosts=$(printf '%s\n' "$OUT" | sed -n 1p)" >> "$GITHUB_OUTPUT"
+          echo "webfetch=${FETCH:+$FETCH,}" >> "$GITHUB_OUTPUT"
+      - uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1.0.248
+        # 10 = a topic needs the agent; 2 = precheck could not read topics.yaml. 11 = no source could
+        # be fetched: the agent would not get further, so the last step fails the job instead.
+        if: steps.precheck.outputs.code == '10' || steps.precheck.outputs.code == '2'
+        env:
+          WHAT_CHANGED_ALLOWED_HOSTS: ${{ steps.allow.outputs.hosts }}
+          WHAT_CHANGED_STORE: ${{ github.workspace }}/uptodate
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: "Use the what-changed skill: run all due topics in light mode. Store: uptodate/."
+          claude_args: |
+            --max-turns 60
+            --permission-mode dontAsk
+            --allowedTools "Read(/uptodate/**),Read(/.claude/skills/what-changed/**),WebSearch,${{ steps.allow.outputs.webfetch }}Edit(/uptodate/ledger/**),Edit(/uptodate/digests/**),Bash(python3 .claude/skills/what-changed/scripts/log_run.py *),Bash(python3 .claude/skills/what-changed/scripts/fingerprint.py *),Bash(python3 .claude/skills/what-changed/scripts/check_ledger.py *),Bash(python3 .claude/skills/what-changed/scripts/verify_quotes.py *)"
+      - name: Commit the store
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          # Refuse to commit if anything but the ledgers, digests and runs.log changed (topics.yaml
+          # included: the agent may not change the watchlist), and never run repo hooks.
+          outside="$(git status --porcelain --untracked-files=all | grep -v -E ' uptodate/(ledger/|digests/|runs\.log$)' || true)"
+          if [ -n "$outside" ]; then echo "Files other than the store's ledgers, digests and runs.log changed; not committing:"; echo "$outside"; exit 1; fi
+          G="git -c core.hooksPath=/dev/null -c user.name=what-changed -c user.email=what-changed@users.noreply.github.com"
+          $G add uptodate/ledger uptodate/digests uptodate/runs.log
+          $G diff --cached --quiet && exit 0
+          $G commit -m "what-changed: $(date -u +%Y-%m-%d)"
+          REMOTE="https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          $G pull --rebase "$REMOTE" "${GITHUB_REF_NAME}"
+          $G push "$REMOTE" "HEAD:${GITHUB_REF_NAME}"
+      - name: Fail if no source could be checked
+        if: steps.precheck.outputs.code == '11'
+        run: |
+          echo "precheck could not fetch any source of a due topic; see today's digest (Could not check)."
+          exit 1

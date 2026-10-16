@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          { "type": "command", "command": "python3 \"/path/to/skills/what-changed/scripts/catch_up.py\" --store \"/path/to/uptodate\" --format plain" }
+        ]
+      }
+    ]
+  }
+}

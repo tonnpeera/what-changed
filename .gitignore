@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.env.*
+# local state written by the scripts
+.catchup-notified
+# skill links created by evals/try-host.sh
+.agents/
+.claude/
+# raw host transcripts can contain local paths
+examples/**/host-output.json
+# your own trial runs from evals/try-host.sh
+examples/local-runs/

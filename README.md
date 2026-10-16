@@ -96,7 +96,20 @@ Copy `skills/what-changed/` into your agent's skills folder. Most people want th
 | Qwen Code | `.qwen/skills/what-changed/` |
 | Claude.ai | zip the folder, then Customize → Skills → Upload (code execution must be on) |
 
-Claude Code can also load the whole repository as a plugin (it has a `.claude-plugin/plugin.json`): clone it and start Claude Code with `claude --plugin-dir /path/to/what-changed`. That lasts one session; the skill is then `what-changed:what-changed`, and its scripts are in the clone's `skills/what-changed/scripts/`.
+**As a Claude Code plugin.** This repository is also a plugin marketplace. In a Claude Code session (version 2.1.275 or later):
+
+```text
+/plugin install what-changed --marketplace tonnpeera/what-changed
+```
+
+Or from your shell:
+
+```bash
+claude plugin marketplace add tonnpeera/what-changed
+claude plugin install what-changed@what-changed
+```
+
+The skill is then `what-changed:what-changed`. Updates: `claude plugin update what-changed@what-changed`. To try it for one session without installing, clone the repository and start Claude Code with `claude --plugin-dir /path/to/what-changed`. To run `precheck.py` yourself, use the copy in a clone (`skills/what-changed/scripts/`).
 
 ## Operating systems
 
@@ -119,14 +132,16 @@ On Windows, use `py -3` (or `python`) where this README says `python3`.
 
 ## Results
 
-On 27 items with known answers, the skill and a plain agent with the same tools scored close on accuracy (1.94 and 1.87 on a 0–2 scale; no significance test was run on that gap). The skill quoted a source on more items, partly because it was given a source list, and it cost more: about 5.7 times the input tokens and 4.6 times the time. One small test does not show that the skill is better than a plain agent.
+The skill was tested three times against a plain agent with the same model and tools, with pass criteria written down before each run. It was not shown to be better. Quality was about the same: accuracy 1.94 against 1.87 (0–2) in [round 1](docs/benchmark.md) and 1.91 against 2.00 in [round 2](docs/benchmark.md#round-2-the-cheaper-skill-against-a-plain-agent-2026-10-16); in [round 3](docs/benchmark.md#round-3-watching-the-same-topics-over-several-runs-2026-10-16), which watched four pages over six weekly rounds, both caught all 5 changes, and the skill raised no false alarms against the plain agent's 2 in 31 unchanged checks (not significant). It cost more every time: 5.7, 2.8 and 3.1 times the input tokens. The free pre-check ended only one of five watching rounds without a model. What the project offers is the method: a claim ledger whose quotes scripts can re-check, and a benchmark whose rules were fixed before the runs.
+
+Round 1 in a chart (27 items with known answers):
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/benchmark-dark.svg">
   <img alt="Bar chart: what-changed versus a plain agent on 27 items. Quality, higher is better: changes caught 18/18 vs 17/18, current value right 16/18 vs 15/18, unchanged items left alone 9/9 vs 8/9, quotes found 47/47 vs 24/26, preferred by both judges 13 vs 3 of 16. Cost, lower is better: 507k vs 89k input tokens per item (5.7 times), 4.6 vs 1.0 minutes per topic (4.6 times)." src="docs/images/benchmark-light.svg" width="100%">
 </picture>
 
-Setup, all measures and caveats: [docs/benchmark.md](docs/benchmark.md). Token use and example runs: [docs/results.md](docs/results.md).
+Setup, all measures and caveats of the three rounds: [docs/benchmark.md](docs/benchmark.md). Token use and example runs: [docs/results.md](docs/results.md).
 
 ## More
 

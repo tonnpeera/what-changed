@@ -1,0 +1,14 @@
+{
+  "name": "what-changed",
+  "description": "The what-changed agent skill as a Claude Code plugin.",
+  "owner": {
+    "name": "tonnpeera",
+    "url": "https://github.com/tonnpeera"
+  },
+  "plugins": [
+    {
+      "name": "what-changed",
+      "source": "./"
+    }
+  ]
+}

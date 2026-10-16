@@ -1518,6 +1518,12 @@ class PluginManifestTests(unittest.TestCase):
             self.assertNotIn(key, manifest, "the plugin adds the skill only; hooks stay opt-in (adapters/)")
         self.assertFalse((ROOT / "hooks").exists(), "a hooks/ folder at the root would load as plugin hooks")
 
+    def test_marketplace_lists_this_repository_under_the_manifest_name(self):
+        market = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+        manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual(market["plugins"], [{"name": manifest["name"], "source": "./"}])
+        self.assertEqual(market["name"], "what-changed")  # the README's install commands use it
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Re-open every `read` source and check its quote really is on the page.
 
-Usage: python3 verify_quotes.py <store-dir | ledger.md ...> [--timeout 20]
+Usage: python3 verify_quotes.py <store-dir | ledger.md ...> [--timeout 20] [--budget 600]
 Deterministic: plain HTTP GET + text normalisation, no model involved.
-Reports found / checkable. Pages that cannot be fetched
+Reports found / checkable. Pages that cannot be fetched, and pages not tried
+because --budget seconds had passed or MAX_PAGES pages were fetched,
 are listed separately as unreachable, not counted as failures; pages that
 render their text with JavaScript will show as "not found" and need a
 manual look. Standard library only.
@@ -13,6 +14,7 @@ from __future__ import annotations
 import io
 import re
 import sys
+import time
 from pathlib import Path
 
 if sys.version_info < (3, 11):  # keep in step with the README's "You need"
@@ -24,6 +26,7 @@ from fingerprint import strip_markup, sub_tags, unescape  # noqa: E402
 from ledger import parse_ledger, scoped_ledger_files  # noqa: E402
 from net import fetch  # noqa: E402
 
+MAX_PAGES = 200  # distinct pages fetched per run
 TRANSLATE = str.maketrans({
     "‘": "'", "’": "'", "“": '"', "”": '"',
     "–": "-", "—": "-", " ": " ", "…": "...",
@@ -81,12 +84,16 @@ def is_pdf(url: str, r) -> bool:
 
 
 def main(argv: list[str]) -> int:
-    timeout = 20.0
+    timeout, budget = 20.0, 600.0
     args = argv[1:]
-    if "--timeout" in args:
-        i = args.index("--timeout")
-        timeout = float(args[i + 1])
-        del args[i:i + 2]
+    for flag in ("--timeout", "--budget"):
+        if flag in args:
+            i = args.index(flag)
+            if flag == "--timeout":
+                timeout = float(args[i + 1])
+            else:
+                budget = float(args[i + 1])
+            del args[i:i + 2]
     if not args or args[0] in ("-h", "--help"):
         print(__doc__)
         return 0 if args else 2
@@ -113,17 +120,25 @@ def main(argv: list[str]) -> int:
     truncated: list[str] = []
     unreachable: list[str] = []
     unsupported: list[str] = []
-    for url, quotes in by_url.items():
-        r = fetch(url, timeout)
+    end = time.monotonic() + budget
+
+    def total() -> float:  # seconds the next fetch may take, 0 once the budget is spent
+        return max(min(3 * timeout, end - time.monotonic()), 0)
+    for n, (url, quotes) in enumerate(by_url.items()):
+        if n >= MAX_PAGES or total() == 0:
+            why = f"over {MAX_PAGES} pages" if n >= MAX_PAGES else f"the {budget:g} s time budget ran out"
+            unreachable += [f"{f} {cid} {url} (not checked: {why})" for f, cid, _ in quotes]
+            continue
+        r = fetch(url, timeout, total=total())
         if r.text is not None and is_pdf(url, r):
             unsupported += [f"{f} {cid} {url} (pdf)" for f, cid, _ in quotes]
             continue
         text = page_text(r.text) if r.text is not None else None
         status = r.status
-        if text is not None and any(quote_key(q) not in text for _, _, q in quotes):
+        if text is not None and any(quote_key(q) not in text for _, _, q in quotes) and total() > 0:
             # Pages can arrive incomplete or vary between loads: fetch once more, keep the longer copy,
             # and treat the page as partial if either copy was.
-            r2 = fetch(url, timeout)
+            r2 = fetch(url, timeout, total=total())
             if r2.text is not None:
                 text2 = page_text(r2.text)
                 if len(text2) > len(text):

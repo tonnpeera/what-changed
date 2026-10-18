@@ -582,6 +582,285 @@ class NetTests(unittest.TestCase):
 
 
 
+class _PairSocket(socket.socket):
+    """The client end of a socketpair, standing in for a TCP connection: connect() starts the
+    server for that address on the other end."""
+    plan: dict = {}
+
+    def connect(self, address):
+        prefix, dripped, *tls = self.plan[address[0]]
+        import threading
+        threading.Thread(target=_serve, args=(self.server, prefix, dripped, *tls), daemon=True).start()
+
+    def setsockopt(self, level, *args):
+        if level != socket.IPPROTO_TCP:  # TCP_NODELAY, which http.client sets, does not apply here
+            super().setsockopt(level, *args)
+
+
+def _serve(sock, prefix: bytes, dripped: bytes, tls=None, gap: float = 0.1, stop_after: float = 4.0):
+    """A watched server: reads the request, sends prefix at once, then dripped one byte every gap
+    seconds (well within the client's per-operation timeout), and gives up after stop_after.
+    With tls (a server SSLContext) it speaks HTTPS."""
+    try:
+        sock.settimeout(stop_after)
+        if tls is not None:
+            sock = tls.wrap_socket(sock, server_side=True)
+        request = b""
+        while b"\r\n\r\n" not in request and not request.startswith(b"\x16"):  # \x16: a TLS ClientHello
+            chunk = sock.recv(4096)
+            if not chunk:
+                return
+            request += chunk
+        sock.sendall(prefix)
+        end = time.monotonic() + stop_after
+        for i in range(len(dripped)):
+            if time.monotonic() > end:
+                return
+            sock.sendall(dripped[i:i + 1])
+            time.sleep(gap)
+    except OSError:
+        pass
+    finally:
+        sock.close()
+
+
+@unittest.skipIf(os.name == "nt", "the socketpair harness and shutdown() waking a blocked recv are not tried on Windows")
+class SlowServerTests(unittest.TestCase):
+    """A server that sends one byte at a time, each within the per-operation timeout, must not hold
+    a fetch, precheck or verify_quotes past their time limits."""
+
+    BODY = b"## 1.0\n" + b"\n" * 300
+    HEAD = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % len(BODY)
+    IPS = {"drip.example": "93.184.215.14", "fast.example": "93.184.215.15"}
+
+    def assert_connections_cut(self):
+        """fetch returns on time by not waiting any longer; on POSIX its connections are also shut
+        down, so the thread it left behind ends at once instead of reading on."""
+        import threading
+        end = time.monotonic() + 1.0
+        while any(th.name == "what-changed fetch" for th in threading.enumerate()) and time.monotonic() < end:
+            time.sleep(0.02)
+        self.assertFalse([th for th in threading.enumerate() if th.name == "what-changed fetch"])
+
+    def serving(self, plan):
+        """Patches name lookups and sockets so that each host in plan ({host: (prefix, dripped)})
+        is served from a socketpair; no network is used."""
+        from contextlib import ExitStack
+        pairs = [socket.socketpair() for _ in range(20)]  # made before socket.socket is replaced
+        self.addCleanup(lambda: [s.close() for pair in pairs for s in pair])
+        _PairSocket.plan = {self.IPS[h]: v for h, v in plan.items()}
+
+        def connection(*a, **kw):
+            client, server = pairs.pop()
+            sock = _PairSocket(client.family, client.type, client.proto, fileno=client.detach())
+            sock.server = server
+            return sock
+
+        def lookup(host, *a, **kw):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (self.IPS[host], 80))]
+        stack = ExitStack()
+        stack.enter_context(mock.patch("urllib.request.getproxies", return_value={}))
+        stack.enter_context(mock.patch("socket.getaddrinfo", side_effect=lookup))
+        stack.enter_context(mock.patch("socket.socket", connection))
+        return stack
+
+    def test_a_dripping_server_cannot_hold_a_fetch(self):
+        for part, prefix, dripped in [("status line and headers", b"", self.HEAD + self.BODY),
+                                      ("body", self.HEAD + self.BODY[:7], self.BODY[7:])]:
+            with self.subTest(part), self.serving({"drip.example": (prefix, dripped)}):
+                start = time.monotonic()
+                r = net.fetch("http://drip.example/", timeout=1.0, total=1.5)
+                took = time.monotonic() - start
+            self.assertEqual((r.text, r.status), (None, net.TOTAL_TIMEOUT))
+            self.assertLess(took, 2.5)
+            self.assert_connections_cut()
+        with self.serving({"drip.example": (b"", self.HEAD + self.BODY)}):
+            start = time.monotonic()
+            r = net.fetch("http://drip.example/", timeout=0.5)  # default total: 3 x timeout
+        self.assertEqual(r.status, net.TOTAL_TIMEOUT)
+        self.assertLess(time.monotonic() - start, 2.5)
+
+    def test_a_server_dripping_the_tls_handshake_cannot_hold_a_fetch(self):
+        """The TLS handshake runs inside urllib too. Python limits a whole handshake to the socket
+        timeout, which fetch caps at the time left."""
+        record = b"\x16\x03\x03\x40\x00"  # a 16 KB handshake record, then its bytes one at a time
+        with self.serving({"drip.example": (record, b"\x00" * 1000)}):
+            start = time.monotonic()
+            r = net.fetch("https://drip.example/", timeout=5.0, total=1.5)
+            took = time.monotonic() - start
+        self.assertIsNone(r.text, r.status)  # the handshake's own limit or the deadline, whichever is first
+        self.assertLess(took, 2.5)
+
+    def test_a_server_dripping_an_https_body_cannot_hold_a_fetch(self):
+        """Each TLS read has its own timeout, so only cutting the wrapped socket ends this one."""
+        import shutil, ssl, subprocess
+        if not shutil.which("openssl"):
+            self.skipTest("needs openssl to make a throwaway certificate")
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        made = subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+                               "-keyout", str(d / "key.pem"), "-out", str(d / "cert.pem"), "-subj", "/CN=drip.example",
+                               "-addext", "subjectAltName=DNS:drip.example"], capture_output=True)
+        if made.returncode:
+            self.skipTest(f"openssl could not make a certificate: {made.stderr[-200:]!r}")
+        server = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server.load_cert_chain(d / "cert.pem", d / "key.pem")
+        trusting = ssl.create_default_context
+        for part, prefix, dripped in [("prompt", self.HEAD + self.BODY, b""),
+                                      ("dripping", self.HEAD + self.BODY[:7], self.BODY[7:])]:
+            with self.subTest(part), self.serving({"drip.example": (prefix, dripped, server)}), \
+                 mock.patch.object(net.ssl, "create_default_context", lambda cafile=None: trusting(cafile=d / "cert.pem")):
+                start = time.monotonic()
+                r = net.fetch("https://drip.example/", timeout=1.0, total=1.5)
+                took = time.monotonic() - start
+            self.assertEqual(r.status, "ok" if part == "prompt" else net.TOTAL_TIMEOUT)
+            self.assertLess(took, 2.5)
+            self.assert_connections_cut()
+
+    def test_a_prompt_server_is_unaffected(self):
+        with self.serving({"fast.example": (self.HEAD + self.BODY, b"")}):
+            r = net.fetch("http://fast.example/", timeout=1.0, total=1.5)
+        self.assertEqual(r.status, "ok")
+        self.assertTrue(r.text.startswith("## 1.0"))
+
+    def test_precheck_reports_a_dripping_source_and_checks_the_rest(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = Path(d)
+            (store / "ledger").mkdir()
+            topics = "topics:\n"
+            for tid, host in (("t0", "drip.example"), ("t1", "fast.example")):
+                topics += f"  - id: {tid}\n    question: \"?\"\n    sources:\n      - http://{host}/\n    cadence: daily\n"
+                (store / "ledger" / f"{tid}.md").write_text(
+                    f"---\ntopic: {tid}\nlast_run: 2026-10-17\nnext_claim_id: 1\n---\n\n## Source state\n"
+                    f"- http://{host}/ — fingerprint: \"1.0\" — checked: 2026-10-17 — ok\n\n## Claims\n", encoding="utf-8")
+            (store / "topics.yaml").write_text(topics, encoding="utf-8")
+            buf = io.StringIO()
+            with self.serving({"drip.example": (self.HEAD + self.BODY[:7], self.BODY[7:]),
+                               "fast.example": (self.HEAD + self.BODY, b"")}), redirect_stdout(buf):
+                start = time.monotonic()
+                code = precheck.main(["precheck.py", "--store", str(store), "--today", "2026-10-18", "--timeout", "0.5"])
+                took = time.monotonic() - start
+            digest = (store / "digests" / "2026-10-18.md").read_text(encoding="utf-8")
+        self.assertEqual(code, 0, buf.getvalue())
+        self.assertLess(took, 3.5)  # one fetch's 1.5 s, then the prompt source
+        self.assertIn(f"[t0] http://drip.example/ — {net.TOTAL_TIMEOUT}", digest)
+        self.assertIn("[t1] fingerprints unchanged", digest)
+
+
+class BudgetTests(unittest.TestCase):
+    """Each fetching script stops starting fetches once its time budget is spent."""
+
+    def slow(self, result):
+        calls = []
+
+        def fetch(url, timeout, total=None):
+            calls.append((url, total))
+            time.sleep(0.3)
+            return result(url)
+        return fetch, calls
+
+    def test_precheck_skips_sources_once_its_budget_is_spent(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = Path(d)
+            (store / "ledger").mkdir()
+            (store / "topics.yaml").write_text(TOPICS + TOPICS.split("\n", 1)[1].replace("demo", "other")
+                                               .replace("example.com", "example.org"), encoding="utf-8")
+            (store / "ledger" / "demo.md").write_text(DEMO_LEDGER, encoding="utf-8")
+            (store / "ledger" / "other.md").write_text(DEMO_LEDGER.replace("demo", "other")
+                                                       .replace("example.com", "example.org"), encoding="utf-8")
+            ok = {"url": "u", "ok": True, "kind": "changelog", "fingerprint": "2.1.296", "detail": "", "partial": False}
+            fp, calls = self.slow(lambda url: ok)
+            buf = io.StringIO()
+            with mock.patch.object(precheck, "fingerprint", side_effect=fp), redirect_stdout(buf):
+                code = precheck.main(["precheck.py", "--store", str(store), "--today", "2026-10-15", "--budget", "0.2"])
+            digest = (store / "digests" / "2026-10-15.md").read_text(encoding="utf-8")
+            other = (store / "ledger" / "other.md").read_text(encoding="utf-8")
+        self.assertEqual(code, 0, buf.getvalue())
+        self.assertEqual([u for u, _ in calls], ["https://example.com/CHANGELOG.md"])
+        self.assertLessEqual(calls[0][1], 0.2)
+        self.assertIn("[other] https://example.org/CHANGELOG.md — not checked: precheck's 0.2 s time budget ran out", digest)
+        self.assertIn("last_run: 2026-10-14", other, "a topic that was not checked stays due")
+        self.assertNotIn("failed", other, "running out of time is not the source's failure")
+
+    def test_a_fetch_cut_short_by_the_budget_is_not_the_sources_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = Path(d)
+            (store / "ledger").mkdir()
+            (store / "topics.yaml").write_text(TOPICS, encoding="utf-8")
+            (store / "ledger" / "demo.md").write_text(DEMO_LEDGER, encoding="utf-8")
+            cut = {"url": "u", "ok": False, "kind": None, "fingerprint": None, "partial": False, "detail": net.TOTAL_TIMEOUT}
+            with mock.patch.object(precheck, "fingerprint", return_value=cut), redirect_stdout(io.StringIO()):
+                code = precheck.main(["precheck.py", "--store", str(store), "--today", "2026-10-15", "--budget", "5"])
+            self.assertEqual(code, precheck.COULD_NOT_CHECK)
+            self.assertIn("not checked: precheck's 5 s time budget ran out",
+                          (store / "digests" / "2026-10-15.md").read_text(encoding="utf-8"))
+            self.assertNotIn("failed", (store / "ledger" / "demo.md").read_text(encoding="utf-8"))
+            with mock.patch.object(precheck, "fingerprint", return_value=cut), redirect_stdout(io.StringIO()):
+                precheck.main(["precheck.py", "--store", str(store), "--today", "2026-10-15"])  # a full 3 x timeout
+            self.assertIn(f"failed (1 in a row): {net.TOTAL_TIMEOUT}", (store / "ledger" / "demo.md").read_text(encoding="utf-8"))
+
+    def test_connecting_stops_trying_addresses_when_the_time_is_up(self):
+        """A name with many addresses that do not answer would otherwise get a full timeout each."""
+        answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (f"93.184.215.{i}", 80)) for i in range(1, 30)]
+        net._current.deadline = net._Deadline(0)
+        try:
+            with mock.patch("socket.getaddrinfo", return_value=answers), mock.patch("socket.socket", side_effect=AssertionError):
+                with self.assertRaises(TimeoutError):
+                    net._pinned_connection(("many.example", 80), 20)
+        finally:
+            net._current.deadline = None
+
+    def test_verify_quotes_stops_at_its_budget_and_page_cap(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = Path(d)
+            (store / "ledger").mkdir()
+            (store / "ledger" / "t.md").write_text("---\ntopic: t\n---\n\n## Claims\n\n" + "".join(
+                f"### C-00{i} · claim {i}\n- status: active\n- confidence: medium — x\n- sources:\n"
+                f"  - [doc](https://x.example/{i}) — T1 — read — quote: \"q\"\n"
+                "- counter-evidence: \"x\" 2026-10-14 → none found\n"
+                "- first_seen: 2026-10-14 · last_confirmed: 2026-10-14 · review_by: 2027-01-14\n\n" for i in (1, 2, 3)),
+                encoding="utf-8")
+            fetch, calls = self.slow(lambda url: net.Fetched("<p>q</p>", "ok", url))
+            out = io.StringIO()
+            with mock.patch.object(verify_quotes, "fetch", side_effect=fetch), redirect_stdout(out):
+                verify_quotes.main(["verify_quotes.py", str(store), "--budget", "0.2"])
+            self.assertEqual([u for u, _ in calls], ["https://x.example/1"])
+            self.assertLessEqual(calls[0][1], 0.2)
+            self.assertEqual(out.getvalue().count("(not checked: the 0.2 s time budget ran out)"), 2)
+            calls.clear()
+            out = io.StringIO()
+            with mock.patch.object(verify_quotes, "fetch", side_effect=fetch), mock.patch.object(verify_quotes, "MAX_PAGES", 2), \
+                 redirect_stdout(out):
+                verify_quotes.main(["verify_quotes.py", str(store)])
+            self.assertEqual(len(calls), 2)
+            self.assertIn("UNREACHABLE t.md C-003 https://x.example/3 (not checked: over 2 pages)", out.getvalue())
+
+    def test_fingerprint_cli_stops_at_its_budget(self):
+        fetch, calls = self.slow(lambda url: net.Fetched("## 1.0\n", "ok", url))
+        out = io.StringIO()
+        with mock.patch.object(fingerprint, "fetch", side_effect=fetch), redirect_stdout(out):
+            fingerprint.main(["fingerprint.py", "https://x.example/1", "https://x.example/2", "--budget", "0.2"])
+        first, second = (json.loads(line) for line in out.getvalue().splitlines())
+        self.assertTrue(first["ok"])
+        self.assertEqual((second["ok"], second["detail"]), (False, "not checked: the 0.2 s time budget ran out"))
+        self.assertEqual(len(calls), 1)
+
+    def test_run_limited_stops_a_script_and_passes_exit_codes_through(self):
+        import run_limited
+        with tempfile.TemporaryDirectory() as d:
+            slow, quick = Path(d) / "slow.py", Path(d) / "quick.py"
+            slow.write_text("import time\ntime.sleep(30)\n", encoding="utf-8")
+            quick.write_text("import sys\nsys.exit(len(sys.argv))\n", encoding="utf-8")
+            from contextlib import redirect_stderr
+            err = io.StringIO()
+            start = time.monotonic()
+            with redirect_stderr(err):
+                self.assertEqual(run_limited.main(["run_limited.py", "0.5", str(slow)]), run_limited.TIMED_OUT)
+            self.assertLess(time.monotonic() - start, 10)
+            self.assertIn("slow.py did not finish within 0.5 s", err.getvalue())
+            self.assertEqual(run_limited.main(["run_limited.py", "30", str(quick), "a", "b"]), 3)
+
+
 class ReportingTests(unittest.TestCase):
     """PDFs, repeated URLs, host lists, not-due topics and dated release notes."""
 
@@ -1019,6 +1298,29 @@ class SchedulerSecurityTests(unittest.TestCase):
         self.assertIn("already ran today", r.stdout)
 
     @POSIX_ONLY
+    def test_one_run_at_a_time(self):
+        """A second start while a run holds the lock exits without running; a lock left by a run
+        that no longer exists does not block the next one."""
+        import hashlib, subprocess
+        def locked_by(pid):
+            def prepare(store):
+                state = store.parent.parent / "home" / ".local" / "state" / "what-changed"
+                state.mkdir(parents=True, exist_ok=True)
+                key = hashlib.sha256(str(store.parent.resolve()).encode()).hexdigest()[:16]
+                (state / f"{key}.lock").symlink_to(str(pid))
+            return prepare
+        r, lines, *_ = self.run_daily_with_fake_claude(prepare=locked_by(os.getpid()))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("another run is in progress", r.stdout)
+        self.assertEqual(lines, [], "no agent while another run holds the lock")
+        gone = subprocess.run(["sh", "-c", "echo $$"], capture_output=True, text=True).stdout.strip()
+        r, lines, tools, store, skill = self.run_daily_with_fake_claude(prepare=locked_by(gone))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(lines, "a stale lock must not block the run")
+        state = store.parent.parent / "home" / ".local" / "state" / "what-changed"
+        self.assertEqual(list(state.glob("*.lock")), [], "the run removes its lock")
+
+    @POSIX_ONLY
     def test_claude_runs_inside_the_store_with_narrow_rules(self):
         r, lines, tools, store, skill = self.run_daily_with_fake_claude()
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -1377,7 +1679,7 @@ class RunLoggingTests(unittest.TestCase):
                                                        encoding="utf-8")
             ok = {"url": "u", "ok": True, "kind": "changelog", "fingerprint": "2.1.296", "detail": "", "partial": False}
             bad = {"url": "u", "ok": False, "kind": None, "fingerprint": None, "partial": False, "detail": "HTTP 503"}
-            with mock.patch.object(precheck, "fingerprint", side_effect=lambda url, t: ok if "example.com" in url else bad), \
+            with mock.patch.object(precheck, "fingerprint", side_effect=lambda url, t, **kw: ok if "example.com" in url else bad), \
                  redirect_stdout(io.StringIO()):
                 self.assertEqual(precheck.main(["precheck.py", "--store", str(store), "--today", "2026-10-15"]), 0)
             digest = (store / "digests" / "2026-10-15.md").read_text(encoding="utf-8")
@@ -1389,7 +1691,7 @@ class RunLoggingTests(unittest.TestCase):
             self.assertIn("last_run: 2026-10-14", (store / "ledger" / "other.md").read_text(encoding="utf-8"))
             self.assertIn("scope=all", (store / "runs.log").read_text(encoding="utf-8").splitlines()[-1])
             for day in ("2026-10-16", "2026-10-17"):
-                with mock.patch.object(precheck, "fingerprint", side_effect=lambda url, t: ok if "example.com" in url else bad), \
+                with mock.patch.object(precheck, "fingerprint", side_effect=lambda url, t, **kw: ok if "example.com" in url else bad), \
                      redirect_stdout(io.StringIO()):
                     self.assertEqual(precheck.main(["precheck.py", "--store", str(store), "--today", day]), 0)
             digest = (store / "digests" / "2026-10-17.md").read_text(encoding="utf-8")

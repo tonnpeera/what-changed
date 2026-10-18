@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Cheap "did this source change?" signal for one or more URLs.
 
-Usage: python3 fingerprint.py URL [URL ...] [--timeout 20]
-Prints one JSON object per URL:
+Usage: python3 fingerprint.py URL [URL ...] [--timeout 20] [--budget 600]
+Prints one JSON object per URL (URLs left when --budget seconds have passed are not fetched;
+their "detail" says so):
   {"url", "ok", "kind", "fingerprint", "detail", "partial", "final_url"}
 kind is one of: release-feed, feed, changelog, page.
 - GitHub repo releases URL  -> newest tag from the releases Atom feed
@@ -21,6 +22,7 @@ import io
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 if sys.version_info < (3, 11):  # keep in step with the README's "You need"
@@ -109,12 +111,13 @@ def from_feed(text: str) -> tuple[str, str]:
     return f"{when} | {title}".strip(" |"), "newest item"
 
 
-def fingerprint(url: str, timeout: float) -> dict:
+def fingerprint(url: str, timeout: float, total: float | None = None) -> dict:
+    """total: seconds the fetch may take in all (net.fetch's default when None)."""
     target = url
     m = re.match(r"https://github\.com/([^/]+)/([^/]+)/releases/?$", url)
     if m:
         target = f"https://github.com/{m.group(1)}/{m.group(2)}/releases.atom"
-    r = fetch(target, timeout)
+    r = fetch(target, timeout, total=total)
     if r.text is None:
         return {"url": url, "ok": False, "kind": None, "fingerprint": None, "detail": r.status,
                 "partial": False, "final_url": r.final_url or url}
@@ -153,17 +156,28 @@ def _classify(url: str, text: str, is_release: bool) -> dict:
 
 
 def main(argv: list[str]) -> int:
-    timeout = 20.0
+    timeout, budget = 20.0, 600.0
     args = argv[1:]
-    if "--timeout" in args:
-        i = args.index("--timeout")
-        timeout = float(args[i + 1])
-        del args[i:i + 2]
+    for flag in ("--timeout", "--budget"):
+        if flag in args:
+            i = args.index(flag)
+            if flag == "--timeout":
+                timeout = float(args[i + 1])
+            else:
+                budget = float(args[i + 1])
+            del args[i:i + 2]
     if not args or args[0] in ("-h", "--help"):
         print(__doc__)
         return 0 if args else 2
+    end = time.monotonic() + budget
     for url in args:
-        print(json.dumps(fingerprint(url, timeout), ensure_ascii=False))
+        left = end - time.monotonic()
+        if left <= 0:
+            r = {"url": url, "ok": False, "kind": None, "fingerprint": None, "partial": False, "final_url": url,
+                 "detail": f"not checked: the {budget:g} s time budget ran out"}
+        else:
+            r = fingerprint(url, timeout, total=min(3 * timeout, left))
+        print(json.dumps(r, ensure_ascii=False))
     return 0
 
 

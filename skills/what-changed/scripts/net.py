@@ -14,6 +14,10 @@
   agent), only those hosts are fetched, so an agent fed instructions by a web page
   cannot use these scripts to send data to any other host.
 - Reads at most MAX_BYTES per page.
+- Takes at most `total` seconds per call (default 3 x timeout), retries and redirects included:
+  the timeout bounds each socket operation, so a server sending one byte at a time could
+  otherwise hold a call for hours. When the time is up the call returns TOTAL_TIMEOUT and its
+  connections are cut.
 - Detects truncated downloads (shorter than Content-Length, which some proxies cause
   without any error), retries, and reports "partial" instead of "ok".
 - Reports a proxy/sandbox refusal as "blocked-local", not as a dead site.
@@ -30,6 +34,8 @@ import os
 import re
 import socket
 import ssl
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -40,10 +46,76 @@ SYSTEM_CA = "/etc/ssl/cert.pem"
 MAX_BYTES = 5_000_000
 
 
+TOTAL_TIMEOUT = "timeout (total)"
+
+
+class _Deadline:
+    """One fetch call's time limit. Every socket the call opens is registered here; when the time
+    is up they are all shut down, which wakes a read blocked anywhere in urllib (on Windows that
+    is not certain, but fetch returns on time either way)."""
+
+    _shutdown = socket.socket.shutdown  # the real one, also for SSL sockets (whose own shutdown unwraps)
+
+    def __init__(self, seconds: float):
+        self.end = time.monotonic() + seconds
+        self.expired = False
+        self._socks: list[socket.socket] = []
+        self._lock = threading.Lock()
+
+    def left(self) -> float:
+        return self.end - time.monotonic()
+
+    def track(self, sock: socket.socket) -> None:
+        with self._lock:
+            self._socks.append(sock)
+            if not self.expired:
+                return
+        self._cut(sock)
+
+    def expire(self) -> None:
+        with self._lock:
+            self.expired = True
+            socks = list(self._socks)
+        for sock in socks:
+            self._cut(sock)
+
+    @classmethod
+    def _cut(cls, sock: socket.socket) -> None:
+        try:
+            cls._shutdown(sock, socket.SHUT_RDWR)
+        except Exception:  # already closed, or handed over to an SSL socket (tracked separately)
+            pass
+
+
+class _Current(threading.local):
+    deadline: _Deadline | None = None
+
+
+_current = _Current()
+
+
+def _track(sock):
+    if _current.deadline is not None:
+        _current.deadline.track(sock)
+    return sock
+
+
+class _TrackedSSLSocket(ssl.SSLSocket):
+    """Wrapping a socket in TLS moves its file descriptor to a new socket object; register that
+    one too, before the handshake, which the server can also send slowly."""
+
+    def do_handshake(self, *args, **kwargs):
+        _track(self)
+        return super().do_handshake(*args, **kwargs)
+
+
 def _context(use_system_ca: bool) -> ssl.SSLContext:
     if use_system_ca and os.path.exists(SYSTEM_CA):
-        return ssl.create_default_context(cafile=SYSTEM_CA)
-    return ssl.create_default_context()
+        context = ssl.create_default_context(cafile=SYSTEM_CA)
+    else:
+        context = ssl.create_default_context()
+    context.sslsocket_class = _TrackedSSLSocket
+    return context
 
 
 # Charsets a web page is written in. Any other codec Python knows (punycode, idna, utf-7,
@@ -205,9 +277,12 @@ def _pinned_connection(address, timeout=_DEFAULT_TIMEOUT, source_address=None, *
     for family, socktype, proto, _, sockaddr in infos:
         sock = None
         try:
-            sock = socket.socket(family, socktype, proto)  # fails for IPv6 answers on an IPv4-only host
+            deadline = _current.deadline
+            if deadline is not None and deadline.left() <= 0:  # many addresses that do not answer
+                raise TimeoutError("total time limit reached while connecting")
+            sock = _track(socket.socket(family, socktype, proto))  # fails for IPv6 answers on an IPv4-only host
             if timeout is not _DEFAULT_TIMEOUT:
-                sock.settimeout(timeout)
+                sock.settimeout(timeout if deadline is None else max(min(timeout, deadline.left()), 0.01))
             if source_address:
                 sock.bind(source_address)
             sock.connect(sockaddr)
@@ -232,6 +307,22 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
         self._create_connection = _pinned_connection
 
 
+def _tracked_connection(*args, **kwargs):
+    return _track(socket.create_connection(*args, **kwargs))
+
+
+class _ProxiedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _tracked_connection
+
+
+class _ProxiedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _tracked_connection
+
+
 def _via_proxy(req: urllib.request.Request) -> bool:
     """True when urllib sends this request through a proxy: the proxy, not us, resolves the
     name then, and the proxy's own address (often 127.0.0.1) must stay reachable."""
@@ -240,12 +331,12 @@ def _via_proxy(req: urllib.request.Request) -> bool:
 
 class _PinnedHTTPHandler(urllib.request.HTTPHandler):
     def http_open(self, req):
-        return self.do_open(http.client.HTTPConnection if _via_proxy(req) else _PinnedHTTPConnection, req)
+        return self.do_open(_ProxiedHTTPConnection if _via_proxy(req) else _PinnedHTTPConnection, req)
 
 
 class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, req):
-        cls = http.client.HTTPSConnection if _via_proxy(req) else _PinnedHTTPSConnection
+        cls = _ProxiedHTTPSConnection if _via_proxy(req) else _PinnedHTTPSConnection
         return self.do_open(cls, req, context=self._context)
 
 
@@ -264,20 +355,44 @@ def _open(req: urllib.request.Request, timeout: float, context: ssl.SSLContext):
     return opener.open(req, timeout=timeout)
 
 
-def fetch(url: str, timeout: float = 20.0, retries: int = 2) -> Fetched:
+def fetch(url: str, timeout: float = 20.0, retries: int = 2, total: float | None = None) -> Fetched:
     """GET a page. A download shorter than its Content-Length is retried and, if it
-    stays short, reported as "partial" (some proxies cut responses without an error)."""
+    stays short, reported as "partial" (some proxies cut responses without an error).
+    The whole call takes at most `total` seconds (default 3 x timeout); after that the
+    status is TOTAL_TIMEOUT, even if part of the page arrived."""
     url = encode_url(url)
     why = refused(url)
     if why:
         return Fetched(None, why, url)
+    deadline = _Deadline(3 * timeout if total is None else total)
+    got: list[Fetched] = []
+
+    def attempts() -> None:  # in its own thread, so the caller can stop waiting on time
+        _current.deadline = deadline
+        try:
+            got.append(_attempts(url, timeout, retries, deadline))
+        except BaseException as e:
+            got.append(Fetched(None, type(e).__name__, url))
+    worker = threading.Thread(target=attempts, name="what-changed fetch", daemon=True)
+    worker.start()
+    worker.join(max(deadline.left(), 0.0))
+    if worker.is_alive() or deadline.expired or not got:
+        deadline.expire()  # cut its connections, so the abandoned thread ends too
+        return Fetched(None, TOTAL_TIMEOUT, url)
+    return got[0]
+
+
+def _attempts(url: str, timeout: float, retries: int, deadline: _Deadline) -> Fetched:
     use_system_ca = False
     best: Fetched | None = None
     charset = "utf-8"
     for _ in range(retries + 2):
+        if deadline.left() <= 0:
+            deadline.expire()
+            break
         req = urllib.request.Request(url, headers=HEADERS)
         try:
-            with _open(req, timeout, _context(use_system_ca)) as resp:
+            with _open(req, max(min(timeout, deadline.left()), 0.01), _context(use_system_ca)) as resp:
                 final = resp.geturl()
                 if urllib.parse.urlsplit(final).scheme not in ("http", "https"):
                     return Fetched(None, "refused: redirected to a non-http(s) URL", final)

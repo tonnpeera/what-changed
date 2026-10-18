@@ -121,6 +121,20 @@ PY
 }
 
 cd "$PROJECT"
+# One run at a time: a second start (another cron line, launchd catching up after sleep) while a run
+# is still going exits here, and one that waited for it sees its record below. The lock is a symlink
+# to the run's pid (made in one step), so a run that was killed, or a lock older than 6 hours, does
+# not block the next ones.
+LOCK="$STATE_DIR/$KEY.lock"
+if ! ln -s "$$" "$LOCK" 2>/dev/null; then
+  if kill -0 "$(readlink "$LOCK")" 2>/dev/null && [ -z "$(find "$LOCK" -maxdepth 0 -mmin +360 2>/dev/null)" ]; then
+    echo "another run is in progress (pid $(readlink "$LOCK"))"; exit 0
+  fi
+  rm -f "$LOCK"
+  ln -s "$$" "$LOCK" 2>/dev/null || { echo "another run is in progress"; exit 0; }
+fi
+trap '[ "$(readlink "$LOCK")" = "$$" ] && rm -f "$LOCK"' EXIT
+[ "$(readlink "$LOCK")" = "$$" ] || { echo "another run is in progress"; exit 0; }  # two runs removed the same stale lock
 if [ "$(cat "$DONE" 2>/dev/null)" = "$TODAY" ]; then echo "already ran today ($TODAY)"; exit 0; fi
 
 # Check the agent CLI before anything else, every day: a missing or old CLI must not stay hidden
@@ -159,11 +173,14 @@ fi
 
 # Quiet-day shortcut: a script checks what is due and whether any source changed.
 # Exit 0 = nothing changed (it writes the quiet-day digest itself; no model, 0 tokens).
+# precheck stops fetching after its 600 s budget; LIMIT is the backstop for anything that misses.
+LIMIT=900
 set +e
-"$PY" -I "$SKILL_DIR/scripts/precheck.py" --store "$STORE" | tee "$LOGDIR/$TODAY-precheck.out"
+"$PY" -I "$SKILL_DIR/scripts/run_limited.py" "$LIMIT" "$SKILL_DIR/scripts/precheck.py" --store "$STORE" | tee "$LOGDIR/$TODAY-precheck.out"
 PRE=${PIPESTATUS[0]}
 set -e
 if [ "$PRE" -eq 0 ]; then echo "$TODAY" > "$DONE"; exit 0; fi
+if [ "$PRE" -eq 124 ]; then fail "precheck did not finish within $LIMIT s and was stopped; today is not counted as done" 12; fi
 STARTED="$("$PY" -I "$SKILL_DIR/scripts/log_run.py" --now | head -n 1)"
 STARTED_EPOCH="$(date +%s)"
 if [ "$PRE" -eq 11 ]; then

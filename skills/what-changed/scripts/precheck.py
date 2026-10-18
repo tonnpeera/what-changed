@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Decide, without a model, whether today's run needs an agent at all.
 
-Usage: python3 precheck.py --store PATH [--today YYYY-MM-DD] [--timeout 20]
+Usage: python3 precheck.py --store PATH [--today YYYY-MM-DD] [--timeout 20] [--budget 600]
 
 For every topic in topics.yaml it works out whether the topic is due (cadence,
 claims past review_by, low/disputed claims to re-check) and, for due topics,
@@ -18,7 +18,8 @@ file dates allow: a ledger whose last_run is today counts as done only if the fi
 written today, and a last_run after today needs the agent.
   10  an agent is needed; the reasons are printed, one topic per line. Nothing written.
   11  could not check: no due topic could be checked, because none of their sources could be
-      fetched (timeout, error, blocked by a local proxy or sandbox). A "Could not check"
+      fetched (timeout, error, blocked by a local proxy or sandbox, or not tried because the
+      run's --budget seconds had passed; each fetch also stops after 3 x --timeout). A "Could not check"
       section is appended to today's digest, but no topic is marked as checked and no scope=all
       line is written, so the day does not count as done: the next run tries again.
       If some due topics were checked and others could not be, the exit code is 0: the digest
@@ -37,6 +38,7 @@ import argparse
 import io
 import re
 import sys
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -47,6 +49,7 @@ if sys.version_info < (3, 11):  # keep in step with the README's "You need"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from catch_up import daily_run_dates, ran_today, written_since  # noqa: E402
 from fingerprint import fingerprint  # noqa: E402
+from net import TOTAL_TIMEOUT  # noqa: E402
 from ledger import UnsafeWrite, open_in_store, parse_ledger, unsafe_target  # noqa: E402
 
 CADENCE_DAYS = {"daily": 1, "weekly": 7, "monthly": 30}
@@ -141,7 +144,8 @@ def ledger_path_for(store: Path, topic_id: str) -> Path:
     return path
 
 
-def topic_status(topic: dict, store: Path, today: date, timeout: float) -> tuple[str, str, dict]:
+def topic_status(topic: dict, store: Path, today: date, timeout: float,
+                 deadline: float | None = None) -> tuple[str, str, dict]:
     """Return (state, reason, details). state: ran-today | not-due | quiet | unchecked | agent."""
     ledger_path = ledger_path_for(store, topic["id"])
     if not ledger_path.is_file():
@@ -182,18 +186,29 @@ def topic_status(topic: dict, store: Path, today: date, timeout: float) -> tuple
         return "not-due", f"next: {next_due.isoformat()}", {}
 
     stored = {m.group(1): m.group(2) for m in SOURCE_STATE.finditer(ledger_path.read_text(encoding="utf-8", errors="replace"))}
-    lines, failed = [], []
+    lines, failed, skipped = [], [], []
+
+    def total() -> float | None:  # seconds the next fetch may take, or 0 once the run's budget is spent
+        return None if deadline is None else max(min(3 * timeout, deadline - time.monotonic()), 0)
     for url in topic.get("sources", []):
+        if total() == 0:  # not a failure of the source: no "failed n in a row", the next run tries it
+            skipped.append(url)
+            continue
+        allowed = total()
         try:
-            r = fingerprint(url, timeout)
+            r = fingerprint(url, timeout, total=allowed)
         except Exception as e:  # one page's content must not stop the other topics
             failed.append((url, f"fingerprint error: {type(e).__name__}"))
+            continue
+        if not r["ok"] and r["detail"] == TOTAL_TIMEOUT and allowed is not None and allowed < 3 * timeout:
+            skipped.append(url)  # cut short by the run's budget, not by the source's own slowness
             continue
         if not r["ok"]:
             failed.append((url, r["detail"]))
             continue
         if r["kind"] == "page" and r.get("partial"):
-            r = fingerprint(url, timeout)
+            if total() != 0:
+                r = fingerprint(url, timeout, total=total())
             if r.get("partial"):
                 failed.append((url, "download truncated (page hash not comparable)"))
                 continue
@@ -206,9 +221,10 @@ def topic_status(topic: dict, store: Path, today: date, timeout: float) -> tuple
         if comparable(old, None) != comparable(r["fingerprint"], r["kind"]):
             return "agent", f"source changed: {url}: {old} → {r['fingerprint']}", {}
         lines.append(f"{url} → {CONTROL.sub(' ', r['fingerprint'])}")
-    if failed and not lines:  # nothing was compared: that is "could not check", never "no change"
-        return "unchecked", "could not check any source", {"failed": failed}
-    return "quiet", "fingerprints unchanged", {"lines": lines, "failed": failed, "next": today + timedelta(days=cadence)}
+    if (failed or skipped) and not lines:  # nothing was compared: that is "could not check", never "no change"
+        return "unchecked", "could not check any source", {"failed": failed, "skipped": skipped}
+    return "quiet", "fingerprints unchanged", {"lines": lines, "failed": failed, "skipped": skipped,
+                                               "next": today + timedelta(days=cadence)}
 
 
 def touch_ledger(store: Path, path: Path, today: str, ok_urls: set[str], failed: dict[str, str],
@@ -241,6 +257,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--store", required=True)
     ap.add_argument("--today", default=date.today().isoformat())
     ap.add_argument("--timeout", type=float, default=20.0)
+    ap.add_argument("--budget", type=float, default=600.0, help="seconds for all fetches; sources left after that are not checked")
     ap.add_argument("--list-sources", action="store_true", help="print every source URL in topics.yaml and exit")
     args = ap.parse_args(argv[1:])
     store = Path(args.store).expanduser().absolute()
@@ -264,8 +281,9 @@ def main(argv: list[str]) -> int:
         print(f"precheck: cannot read topics.yaml ({e}); run the agent instead")
         return 2
 
+    deadline = time.monotonic() + args.budget
     try:
-        results = [(t, *topic_status(t, store, today, args.timeout)) for t in topics]
+        results = [(t, *topic_status(t, store, today, args.timeout, deadline)) for t in topics]
     except TopicsFormatError as e:  # e.g. a ledger that is a symlink out of ledger/
         print(f"precheck: {e}; run the agent instead")
         return 2
@@ -332,6 +350,8 @@ def main(argv: list[str]) -> int:
         for url, detail in d["failed"]:
             gone = " — possibly gone: consider replacing or removing it" if counts.get(url, 0) >= POSSIBLY_GONE else ""
             could_not.append(f"- [{t['id']}] {url} — {CONTROL.sub(' ', detail)} (failed {counts.get(url, 1)} run(s) in a row){gone}")
+        for url in d.get("skipped", []):
+            could_not.append(f"- [{t['id']}] {url} — not checked: precheck's {args.budget:g} s time budget ran out")
     section += [f"- not due: [{t['id']}] ({reason})" for t, reason in not_due]
     if could_not:
         section += ["", "### Could not check"] + could_not

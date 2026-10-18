@@ -3,7 +3,7 @@ name: what-changed
 description: Keeps a dated, source-labelled ledger of what is known about topics the user follows, and on each run (usually daily) reports which claims are new, changed, superseded or disputed, where each came from and how confident it is. Use when the user asks to track a topic, get a daily/weekly update or digest, check "what changed since last time", stay up to date on a product, field, policy or market, add or review a watchlist topic, or run the scheduled update.
 license: MIT
 metadata:
-  version: "0.1.3"
+  version: "0.1.4"
 ---
 
 # what-changed
@@ -45,7 +45,7 @@ The user may say these in plain language. Default is `run`.
 | Command | What it does |
 |---|---|
 | `run [topic-id…] [--mode light\|full]` | The daily run below. No topic = all topics that are due. |
-| `add <topic>` | Interview briefly (question, trusted sources, cadence, what counts as a change), append to `topics.yaml`, then do a baseline run for it. |
+| `add <topic>` | Interview briefly (question, trusted sources, cadence, what counts as a change), append to `topics.yaml`, then do a baseline run for it. If they use the daily scheduler (`run-daily.sh` / `.ps1`), tell them it stops until they run it once with `WHAT_CHANGED_APPROVE_TOPICS=1`. |
 | `review` | No web. Read ledgers, list claims past `review_by`, low/disputed claims, and topics overdue. |
 | `setup [hook\|scheduler\|both]` | One-time: create the store, then set up daily running. Ask which the user wants, with no preselected answer, explaining each in one line: *hook* = at session start, offer the run if today's is missing (no timer; only works when you open a session); *scheduler* = a real timer that runs even if you never open a session (needs the machine on, or a cloud service); *both* = timer, plus the hook to catch days the timer missed. Use [adapters/README.md](adapters/README.md) to pick the right file for this host, show the user the exact config you will write and write it only after the user says yes. Never edit global settings files without that yes. |
 | `propose` | Read files the user points to (notes, docs, a dependency list, anything with dates to keep an eye on) and *propose* topics. Write proposals at the end of today's digest marked `proposed`. Never add them to `topics.yaml` without the user's yes. |

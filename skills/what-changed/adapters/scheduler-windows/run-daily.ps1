@@ -78,6 +78,12 @@ function Stop-Run([string]$Why, [int]$Code) {
 }
 
 if (-not (Test-Path -LiteralPath $Store -PathType Container)) { Stop-Run "no store folder at $Store" 2 }
+# One run at a time: a second start while a run is still going exits here,
+# and one that waited for it sees its record below. Windows releases the open lock file
+# when this process ends, however it ends.
+$LockPath = Join-Path (Join-Path $StateRoot 'what-changed') "$Key.lock"
+try { $Lock = [IO.File]::Open($LockPath, 'OpenOrCreate', 'ReadWrite', 'None') }
+catch { Write-Host 'another run is in progress'; exit 0 }
 if ((Test-Path -LiteralPath $Done) -and ("$(Get-Content -LiteralPath $Done -Raw)".Trim() -eq $Today)) {
   Write-Host "already ran today ($Today)"; exit 0
 }
@@ -118,10 +124,15 @@ if ($env:WHAT_CHANGED_APPROVE_TOPICS -eq '1' -or -not (Test-Path -LiteralPath $A
 # Quiet-day shortcut: exit 0 = nothing due or changed (digest written, no model, 0 tokens);
 # 11 = no source could be fetched (not counted as done); 10 = an agent is needed.
 $Scripts = Join-Path $Skill 'scripts'
+# The scripts stop fetching after their 600 s budgets; run_limited.py stops them after $Limit
+# seconds as the backstop for anything that misses (exit code 124).
+$Limit = '900'
+$Limited = Join-Path $Scripts 'run_limited.py'
 $PrecheckOut = Join-Path $LogDir "$Today-precheck.out"
-Invoke-Py @((Join-Path $Scripts 'precheck.py'), '--store', $Store) | Tee-Object -FilePath $PrecheckOut
+Invoke-Py @($Limited, $Limit, (Join-Path $Scripts 'precheck.py'), '--store', $Store) | Tee-Object -FilePath $PrecheckOut
 $Pre = $LASTEXITCODE
 if ($Pre -eq 0) { Set-Content -LiteralPath $Done -Value $Today -Encoding utf8; exit 0 }
+if ($Pre -eq 124) { Stop-Run "precheck did not finish within $Limit s and was stopped; today is not counted as done" 12 }
 if ($Pre -eq 11) { Stop-Run "no source of a due topic could be fetched (see $PrecheckOut); today is not counted as done" 11 }
 
 $NowOut = @(Invoke-Py @((Join-Path $Scripts 'log_run.py'), '--now'))
@@ -157,7 +168,9 @@ $Urls = @(Invoke-Py @((Join-Path $Scripts 'precheck.py'), '--store', $RealStore,
 if ($LASTEXITCODE -ne 0) { Stop-Run 'precheck.py --list-sources could not read topics.yaml' 2 }
 $Prints = @()
 if ($Urls.Count -gt 0) {
-  foreach ($Line in @(Invoke-Py (@((Join-Path $Scripts 'fingerprint.py')) + $Urls))) {
+  $FingerprintOut = @(Invoke-Py (@($Limited, $Limit, (Join-Path $Scripts 'fingerprint.py')) + $Urls))
+  if ($LASTEXITCODE -eq 124) { Stop-Run "fingerprint.py did not finish within $Limit s and was stopped" 12 }
+  foreach ($Line in $FingerprintOut) {
     try { $F = $Line | ConvertFrom-Json } catch { continue }
     if ($F.ok) { $Prints += "$($F.url) -> $($F.fingerprint)" } else { $Prints += "$($F.url) -> could not fetch: $($F.detail)" }
   }
@@ -194,8 +207,8 @@ if (-not (Test-Path -LiteralPath $Digest) -or (Get-Item -LiteralPath $Digest).La
 $CheckOut = Join-Path $LogDir "$Today-check_ledger.out"
 Invoke-Py @((Join-Path $Scripts 'check_ledger.py'), $RealStore) | Set-Content -LiteralPath $CheckOut -Encoding utf8
 if ($LASTEXITCODE -ne 0) { Stop-Run "check_ledger.py found problems in the ledgers; see $CheckOut" 6 }
-Invoke-Py @((Join-Path $Scripts 'verify_quotes.py'), $RealStore) | Set-Content -LiteralPath (Join-Path $LogDir "$Today-verify_quotes.out") -Encoding utf8
-$Quotes = $LASTEXITCODE   # unreachable pages are common; recorded, not fatal
+Invoke-Py @($Limited, $Limit, (Join-Path $Scripts 'verify_quotes.py'), $RealStore) | Set-Content -LiteralPath (Join-Path $LogDir "$Today-verify_quotes.out") -Encoding utf8
+$Quotes = $LASTEXITCODE   # unreachable pages are common, and 124 is a stopped run; recorded, not fatal
 
 # The runs.log line comes from the clock, not from the agent.
 Invoke-Py @((Join-Path $Scripts 'log_run.py'), '--store', $RealStore, '--started', $Started,

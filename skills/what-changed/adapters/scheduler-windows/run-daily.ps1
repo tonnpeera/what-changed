@@ -9,6 +9,8 @@ Schedule it with Task Scheduler (see ../README.md). Not tested on Windows yet; i
   -Claude        full path to claude.exe (optional; or set WHAT_CHANGED_CLAUDE;
                  default: %USERPROFILE%\.local\bin\claude.exe, else the first claude on PATH)
   -Python        Python 3.11 or later (optional; or set WHAT_CHANGED_PYTHON; default: py -3, then python)
+  WHAT_CHANGED_APPROVE_TOPICS=1  approve topics.yaml as it is now, after you changed it; until then a
+                 changed topics.yaml stops the run
 
 How it differs from run-daily.sh: the agent gets no shell at all. This script runs the skill's
 scripts itself: precheck.py and fingerprint.py before the agent (the fingerprints go into the
@@ -97,6 +99,22 @@ $VersionLine = if ($VersionOut.Count -gt 0) { $VersionOut[0] } else { 'cli_versi
 if ($VersionCode -eq 4) { Stop-Run "$VersionLine; try again later, or raise WHAT_CHANGED_VERSION_TIMEOUT" 3 }
 if ($VersionCode -ne 0) { Stop-Run "$VersionLine; unattended runs use --restricted. Update Claude Code, or set -Claude to another claude" 3 }
 
+# topics.yaml decides which hosts precheck and the agent may fetch, and an interactive session can
+# edit it. So precheck and hosts.py read it only while it matches the copy you approved: its hash is
+# kept here, outside the project, recorded on the first run and again whenever you run this script
+# once with WHAT_CHANGED_APPROVE_TOPICS=1.
+$Approved = Join-Path (Join-Path $StateRoot 'what-changed') "$Key.topics.sha256"
+function Get-TopicsHash {
+  $File = Join-Path $Store 'topics.yaml'
+  if (Test-Path -LiteralPath $File -PathType Leaf) { (Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash.ToLower() } else { 'none' }
+}
+$TopicsHash = Get-TopicsHash
+if ($env:WHAT_CHANGED_APPROVE_TOPICS -eq '1' -or -not (Test-Path -LiteralPath $Approved)) {
+  Set-Content -LiteralPath $Approved -Value $TopicsHash -Encoding ascii
+} elseif ("$(Get-Content -LiteralPath $Approved -Raw)".Trim() -ne $TopicsHash) {
+  Stop-Run "topics.yaml changed since you approved it. Check $Store\topics.yaml (its sources are fetched without asking), then run this script once with WHAT_CHANGED_APPROVE_TOPICS=1" 7
+}
+
 # Quiet-day shortcut: exit 0 = nothing due or changed (digest written, no model, 0 tokens);
 # 11 = no source could be fetched (not counted as done); 10 = an agent is needed.
 $Scripts = Join-Path $Skill 'scripts'
@@ -163,6 +181,10 @@ try {
   $AgentExit = $LASTEXITCODE
 } finally { Pop-Location }
 if ($AgentExit -ne 0) { Stop-Run "claude exited with code $AgentExit; see $Err" 4 }
+# A run must not change the watchlist: the next runs would fetch whatever it added.
+if ((Get-TopicsHash) -ne $TopicsHash) {
+  Stop-Run "the agent changed topics.yaml; today is not counted as done. Check $Store\topics.yaml, then run this script once with WHAT_CHANGED_APPROVE_TOPICS=1" 7
+}
 
 # The run happened only if the agent wrote today's digest.
 $Digest = Join-Path (Join-Path $RealStore 'digests') "$Today.md"

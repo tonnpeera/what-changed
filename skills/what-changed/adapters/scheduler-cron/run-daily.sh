@@ -9,6 +9,8 @@
 #   WHAT_CHANGED_CLAUDE=/path/to/claude           claude host: which claude to run (optional; default:
 #                                                 ~/.local/bin/claude, where the installer puts it, else PATH)
 #   WHAT_CHANGED_VERSION_TIMEOUT=30               claude host: seconds `claude --version` may take (optional)
+#   WHAT_CHANGED_APPROVE_TOPICS=1                 approve topics.yaml as it is now, after you changed it;
+#                                                 until then a changed topics.yaml stops the run
 #
 # Exits early once it has completed a run today (its own record under ~/.local/state/what-changed/,
 # outside the project, where no host's agent writes), so it is safe to schedule more than once a day.
@@ -142,6 +144,19 @@ if [ "$HOST" = claude ]; then
   fi
 fi
 
+# topics.yaml decides which hosts precheck fetches and which ones the claude agent may fetch, and
+# other hosts' agents (or an interactive session) can edit it. So precheck and hosts.py read it only
+# while it matches the copy you approved: its hash is kept here, outside the project, recorded on
+# the first run and again whenever you run this script once with WHAT_CHANGED_APPROVE_TOPICS=1.
+APPROVED="$STATE_DIR/$KEY.topics.sha256"
+topics_hash() { if [ -f "$STORE/topics.yaml" ]; then $SHA < "$STORE/topics.yaml" | cut -d' ' -f1; else echo none; fi; }
+TOPICS_HASH="$(topics_hash)"
+if [ "${WHAT_CHANGED_APPROVE_TOPICS:-}" = 1 ] || [ ! -f "$APPROVED" ]; then
+  echo "$TOPICS_HASH" > "$APPROVED"
+elif [ "$(cat "$APPROVED")" != "$TOPICS_HASH" ]; then
+  fail "topics.yaml changed since you approved it. Check $STORE/topics.yaml (its sources are fetched without asking), then run this script once with WHAT_CHANGED_APPROVE_TOPICS=1" 7
+fi
+
 # Quiet-day shortcut: a script checks what is due and whether any source changed.
 # Exit 0 = nothing changed (it writes the quiet-day digest itself; no model, 0 tokens).
 set +e
@@ -208,6 +223,10 @@ case "$HOST" in
   *)
     fail "unknown WHAT_CHANGED_HOST: $HOST" 2 ;;
 esac
+# A run must not change the watchlist: the next runs would fetch whatever it added.
+if [ "$(topics_hash)" != "$TOPICS_HASH" ]; then
+  fail "the agent changed topics.yaml; today is not counted as done. Check $STORE/topics.yaml, then run this script once with WHAT_CHANGED_APPROVE_TOPICS=1" 7
+fi
 # The agent should have logged today's run with log_run.py. If it wrote today's digest but no log
 # line, log it here; with no digest either, the run did not happen: leave the day open.
 set +e

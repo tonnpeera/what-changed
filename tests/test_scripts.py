@@ -929,22 +929,28 @@ class SchedulerSecurityTests(unittest.TestCase):
                 with self.subTest(extra=bad):
                     self.assertEqual(allow(bad)[0], 2)
 
-    def run_daily_with_fake_claude(self, extra_env=None, prepare=None):
-        """run-daily.sh with a stand-in `claude` that records its folder, arguments and env."""
-        import shutil, subprocess
-        d = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, d, True)
+    def run_daily_with_fake_claude(self, extra_env=None, prepare=None, root=None):
+        """run-daily.sh with a stand-in `claude` that records its folder, arguments and env.
+        Pass the root of an earlier call (store.parent.parent) to run again in the same project."""
+        import shutil
+        d = root or tempfile.mkdtemp()
         project, home, bindir = Path(d) / "project", Path(d) / "home", Path(d) / "bin"
         store = project / "uptodate"
+        skill = home / "skills" / "what-changed"
+        record = Path(d) / "record.txt"
+        record.unlink(missing_ok=True)
+        if root:
+            if prepare:
+                prepare(store)
+            return SchedulerSecurityTests._run_daily(d, store, skill, record, extra_env)
+        self.addCleanup(shutil.rmtree, d, True)
         store.mkdir(parents=True)
         bindir.mkdir()
         (project / "secret.env").write_text("TOKEN=x\n", encoding="utf-8")
         (store / "topics.yaml").write_text(TOPICS, encoding="utf-8")  # no ledger yet: precheck exits 10
         if prepare:
             prepare(store)
-        skill = home / "skills" / "what-changed"
         shutil.copytree(ROOT / "skills" / "what-changed", skill)
-        record = Path(d) / "record.txt"
         fake = bindir / "claude"
         fake.write_text('#!/bin/sh\n[ "$1" = --version ] && [ -n "$FAKE_HANG" ] && sleep 30\n'
                         '[ "$1" = --version ] && { echo "${FAKE_VERSION:-2.1.300} (Claude Code)"; exit 0; }\n'
@@ -954,14 +960,63 @@ class SchedulerSecurityTests(unittest.TestCase):
                         '[ -n "$FAKE_FAIL" ] && { echo "{\\"result\\": \\"Not logged in\\"}"; exit 1; }\nexit 0\n',
                         encoding="utf-8")
         fake.chmod(0o755)
+        # A stand-in codex that writes today's digest and, with FAKE_ADD_SOURCE, adds a source to
+        # topics.yaml, as a page read by the agent could tell it to.
+        codex = bindir / "codex"
+        codex.write_text(f"#!{sys.executable}\nimport datetime, os, pathlib\n"
+                         "s = pathlib.Path('uptodate')\n(s / 'digests').mkdir(exist_ok=True)\n"
+                         "(s / 'digests' / f'{datetime.date.today()}.md').write_text('# Digest\\n')\n"
+                         "t = s / 'topics.yaml'\n"
+                         "if os.environ.get('FAKE_ADD_SOURCE'):\n"
+                         "    t.write_text(t.read_text().replace('    sources:\\n', '    sources:\\n      - '"
+                         " + os.environ['FAKE_ADD_SOURCE'] + '\\n'))\n", encoding="utf-8")
+        codex.chmod(0o755)
+        return SchedulerSecurityTests._run_daily(d, store, skill, record, extra_env)
+
+    @staticmethod
+    def _run_daily(d, store, skill, record, extra_env):
+        import subprocess
+        home, bindir = Path(d) / "home", Path(d) / "bin"
         env = {"PATH": f"{bindir}:{os.environ.get('PATH', '/usr/bin:/bin')}", "HOME": str(home), "RECORD": str(record),
-               "WHAT_CHANGED_HOST": "claude", "WHAT_CHANGED_PROJECT": str(project),
+               "WHAT_CHANGED_HOST": "claude", "WHAT_CHANGED_PROJECT": str(store.parent),
                "WHAT_CHANGED_PYTHON": sys.executable, **(extra_env or {})}
         r = subprocess.run(["bash", str(skill / "adapters" / "scheduler-cron" / "run-daily.sh")],
                            env=env, capture_output=True, text=True, timeout=60)
         lines = record.read_text(encoding="utf-8").splitlines() if record.exists() else []
         tools = next((l.split(" ", 1)[1] for i, l in enumerate(lines) if i and lines[i - 1] == "ARG --allowedTools"), "")
         return r, lines, tools, store.resolve(), skill.resolve()
+
+    @POSIX_ONLY
+    def test_a_changed_topics_yaml_waits_for_approval(self):
+        """Other hosts' agents can edit topics.yaml, whose hosts precheck fetches and the claude agent
+        may fetch. A run whose agent changed it is not done, and later runs stop before precheck
+        until the file is approved with WHAT_CHANGED_APPROVE_TOPICS=1."""
+        planted = "https://attacker.example/x?leak=1"
+        r, lines, tools, store, skill = self.run_daily_with_fake_claude(
+            {"WHAT_CHANGED_HOST": "codex", "FAKE_ADD_SOURCE": planted})
+        root, state = store.parent.parent, store.parent.parent / "home" / ".local" / "state" / "what-changed"
+        self.assertIn(planted, (store / "topics.yaml").read_text(encoding="utf-8"), "the stand-in agent ran")
+        self.assertEqual(r.returncode, 7, r.stderr)
+        self.assertIn("the agent changed topics.yaml", r.stderr)
+        [logdir] = [p for p in state.iterdir() if p.is_dir()]
+        self.assertIn("the agent changed topics.yaml", (logdir / f"{date.today()}-error.txt").read_text(encoding="utf-8"))
+        self.assertFalse(list(state.glob("*.last-run")), "the day must not count as done")
+        precheck_out = logdir / f"{date.today()}-precheck.out"
+        precheck_out.unlink()
+
+        r, lines, tools, *_ = self.run_daily_with_fake_claude(root=root)
+        self.assertEqual(r.returncode, 7, r.stderr)
+        self.assertIn("topics.yaml changed since you approved it", r.stderr)
+        self.assertFalse(precheck_out.exists(), "precheck must not read an unapproved topics.yaml")
+        self.assertEqual(lines, [], "the agent must not start with the planted host allowed")
+        self.assertFalse(list(state.glob("*.last-run")))
+
+        r, lines, tools, *_ = self.run_daily_with_fake_claude({"WHAT_CHANGED_APPROVE_TOPICS": "1"}, root=root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("WebFetch(domain:attacker.example)", tools.split(","), "approved by the operator")
+        r, lines, *_ = self.run_daily_with_fake_claude(root=root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("already ran today", r.stdout)
 
     @POSIX_ONLY
     def test_claude_runs_inside_the_store_with_narrow_rules(self):

@@ -134,8 +134,9 @@ def main(argv: list[str]) -> int:
         from precheck import TopicsFormatError
         try:
             summary, lines = compare(Path(a.compare).expanduser(), topics)
-        except (OSError, TopicsFormatError) as e:
-            print(f"could not compare the watchlists ({e})")
+        except (OSError, TopicsFormatError) as e:  # the detail can quote the file: stderr only
+            print("could not compare the watchlists")
+            print(f"hosts.py --compare: {e}", file=sys.stderr)
             return 2
         print(summary)
         if lines:

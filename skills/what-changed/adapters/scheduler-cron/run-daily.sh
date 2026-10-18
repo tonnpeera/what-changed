@@ -9,7 +9,7 @@
 #   WHAT_CHANGED_CLAUDE=/path/to/claude           claude host: which claude to run (optional; default:
 #                                                 ~/.local/bin/claude, where the installer puts it, else PATH)
 #   WHAT_CHANGED_VERSION_TIMEOUT=30               claude host: seconds `claude --version` may take (optional)
-#   WHAT_CHANGED_APPROVE_TOPICS=<12 characters>   approve the topics.yaml you reviewed, then exit (runs stop
+#   WHAT_CHANGED_APPROVE_TOPICS=<32 characters>   approve the topics.yaml you reviewed, then exit (runs stop
 #                                                 while topics.yaml differs from the approved copy; the stop
 #                                                 message shows what changed and the exact command)
 #
@@ -144,19 +144,21 @@ read_topics_hash() {
 approve() {  # copy topics.yaml as the approved version, if it still is the one with hash $TOPICS_HASH
   cp "$TOPICS" "$APPROVED.new" && [ "$(sha_of "$APPROVED.new")" = "$TOPICS_HASH" ] && mv "$APPROVED.new" "$APPROVED" \
     || { rm -f "$APPROVED.new"; fail "could not record the approval of $TOPICS (did it change just now?)" 7; }
-  echo "approved topics.yaml ${TOPICS_HASH:0:12}; scheduled runs fetch only from: $("$PY" -I "$SKILL_DIR/scripts/hosts.py" --store "$STORE" --topics "$APPROVED" --comma)"
+  echo "approved topics.yaml ${TOPICS_HASH:0:32}; scheduled runs fetch only from: $("$PY" -I "$SKILL_DIR/scripts/hosts.py" --store "$STORE" --topics "$APPROVED" --comma)"
 }
 topics_stop() {  # why: show what changed against the approved copy, then stop with the command that approves it
-  CMD="WHAT_CHANGED_APPROVE_TOPICS=${TOPICS_HASH:0:12} WHAT_CHANGED_HOST=$HOST WHAT_CHANGED_PROJECT=$(printf '%q' "$PROJECT") $(printf '%q' "$SKILL_DIR/adapters/scheduler-cron/run-daily.sh")"
-  CHANGES="$("$PY" -I "$SKILL_DIR/scripts/hosts.py" --store "$STORE" --compare "$APPROVED" | head -n 1)" || true
+  CMD="WHAT_CHANGED_APPROVE_TOPICS=${TOPICS_HASH:0:32} WHAT_CHANGED_HOST=$HOST WHAT_CHANGED_PROJECT=$(printf '%q' "$PROJECT") $(printf '%q' "$SKILL_DIR/adapters/scheduler-cron/run-daily.sh")"
+  # Only a summary line of the expected shape goes into the error file, which the next session reads.
+  CHANGES="$("$PY" -I "$SKILL_DIR/scripts/hosts.py" --store "$STORE" --compare "$APPROVED" | head -n 1)" || CHANGES=""
+  printf '%s\n' "$CHANGES" | grep -Eq '^[0-9]+ source\(s\) added, [0-9]+ removed; hosts not approved before: [a-z0-9.,* -]+$' || CHANGES=""
   fail "topics.yaml needs your approval: $1 (${CHANGES:-could not compare}). Review $TOPICS (the added and removed sources are listed above this line on stderr), then approve this version with: $CMD" 7
 }
 # Approving is a step of its own, which works on a day that already ran: it records the version you
 # reviewed (named by the start of its hash, so a later edit is not approved with it) and exits.
 if [ -n "${WHAT_CHANGED_APPROVE_TOPICS:-}" ]; then
   read_topics_hash
-  if [ "$WHAT_CHANGED_APPROVE_TOPICS" != "${TOPICS_HASH:0:12}" ]; then
-    topics_stop "it is not the version you approved (its hash starts with ${TOPICS_HASH:0:12}, not $WHAT_CHANGED_APPROVE_TOPICS)"
+  if [ "$WHAT_CHANGED_APPROVE_TOPICS" != "${TOPICS_HASH:0:32}" ]; then
+    topics_stop "it is not the version you approved (its hash starts with ${TOPICS_HASH:0:32}, not $WHAT_CHANGED_APPROVE_TOPICS)"
   fi
   approve
   exit 0

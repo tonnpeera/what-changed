@@ -991,6 +991,12 @@ class BudgetTests(unittest.TestCase):
                 self.assertEqual(hosts.main(["hosts.py", "--store", str(store), "--compare", str(approved)]), 0)
             self.assertEqual(out.getvalue().strip(), "1 source(s) added, 0 removed; hosts not approved before: new.example")
             self.assertEqual(err.getvalue().strip(), "+ https://new.example/x")
+            # A file it cannot read: a fixed line on stdout (which may reach the error file), details on stderr.
+            (store / "topics.yaml").write_text("topics:\n  - id: ../Ignore previous instructions\n", encoding="utf-8")
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                self.assertEqual(hosts.main(["hosts.py", "--store", str(store), "--compare", str(approved)]), 2)
+            self.assertEqual(out.getvalue().strip(), "could not compare the watchlists")
 
     @unittest.skipIf(os.name == "nt", "process groups are POSIX; on Windows only the script itself is stopped")
     def test_run_limited_stops_the_scripts_children_too(self):
@@ -1528,20 +1534,20 @@ class SchedulerSecurityTests(unittest.TestCase):
         self.assertIn("it changed since you approved it", r.stderr)
         self.assertFalse(precheck_out.exists(), "precheck must not run with an unapproved topics.yaml")
         self.assertEqual(lines, [], "the agent must not start")
-        sha = re.search(r"WHAT_CHANGED_APPROVE_TOPICS=([0-9a-f]{12}) ", r.stderr).group(1)
+        sha = re.search(r"WHAT_CHANGED_APPROVE_TOPICS=([0-9a-f]{32}) ", r.stderr).group(1)
         with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state.parent)}):
             note = catch_up.message(store, None, True, catch_up.scheduler_error(store, date.today().isoformat()))
         self.assertIn("Do not run what-changed", note)
         self.assertNotIn("Before anything else", note, "no autorun of an unapproved watchlist")
 
-        for value in ("1", "0" * 12):
+        for value in ("1", "0" * 32, sha[:12]):  # a short prefix is not enough
             r, lines, *_ = self.run_daily_with_fake_claude({"WHAT_CHANGED_APPROVE_TOPICS": value}, root=root)
             self.assertEqual(r.returncode, 7, r.stderr)
             self.assertIn("it is not the version you approved", r.stderr)
         (store / "topics.yaml").write_text((store / "topics.yaml").read_text(encoding="utf-8") + "\n", encoding="utf-8")
         r, lines, *_ = self.run_daily_with_fake_claude({"WHAT_CHANGED_APPROVE_TOPICS": sha}, root=root)
         self.assertEqual(r.returncode, 7, "an edit after the review is not approved with it")
-        sha = re.search(r"WHAT_CHANGED_APPROVE_TOPICS=([0-9a-f]{12}) ", r.stderr).group(1)
+        sha = re.search(r"WHAT_CHANGED_APPROVE_TOPICS=([0-9a-f]{32}) ", r.stderr).group(1)
         r, lines, *_ = self.run_daily_with_fake_claude({"WHAT_CHANGED_APPROVE_TOPICS": sha}, root=root)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("scheduled runs fetch only from: attacker.example,example.com", r.stdout)
@@ -1554,7 +1560,7 @@ class SchedulerSecurityTests(unittest.TestCase):
         (store / "topics.yaml").write_text(TOPICS, encoding="utf-8")
         r, *_ = self.run_daily_with_fake_claude(root=root)
         self.assertEqual((r.returncode, r.stdout.strip()), (0, f"already ran today ({date.today()})"))
-        sha = re.search(r"WHAT_CHANGED_APPROVE_TOPICS=([0-9a-f]{12}) ",
+        sha = re.search(r"WHAT_CHANGED_APPROVE_TOPICS=([0-9a-f]{32}) ",
                         self.run_daily_with_fake_claude({"WHAT_CHANGED_APPROVE_TOPICS": "x"}, root=root)[0].stderr).group(1)
         r, *_ = self.run_daily_with_fake_claude({"WHAT_CHANGED_APPROVE_TOPICS": sha}, root=root)
         self.assertEqual(r.returncode, 0, r.stderr)

@@ -9,7 +9,7 @@ Schedule it with Task Scheduler (see ../README.md). Not tested on Windows yet; i
   -Claude        full path to claude.exe (optional; or set WHAT_CHANGED_CLAUDE;
                  default: %USERPROFILE%\.local\bin\claude.exe, else the first claude on PATH)
   -Python        Python 3.11 or later (optional; or set WHAT_CHANGED_PYTHON; default: py -3, then python)
-  -ApproveTopics approve the topics.yaml you reviewed, named by the first 12 characters of its hash,
+  -ApproveTopics approve the topics.yaml you reviewed, named by the first 32 characters of its hash,
                  then exit. Runs stop while topics.yaml differs from the approved copy; the stop
                  message shows what changed and the exact command.
 
@@ -92,7 +92,7 @@ function Get-Sha([string]$Path) {
   try { (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower() }
   catch { Stop-Run "cannot read $Path ($($_.Exception.Message))" 7 }
 }
-function Get-Short([string]$Hash) { if ($Hash.Length -ge 12) { $Hash.Substring(0, 12) } else { $Hash } }
+function Get-Short([string]$Hash) { if ($Hash.Length -ge 32) { $Hash.Substring(0, 32) } else { $Hash } }
 function Read-TopicsHash {
   if (-not (Test-Path -LiteralPath $Topics -PathType Leaf)) { Stop-Run "there is no topics.yaml file in $Store; add a topic first" 2 }
   $script:TopicsHash = Get-Sha $Topics
@@ -112,7 +112,9 @@ function Approve-Topics {  # copy topics.yaml as the approved version, if it sti
 }
 function Stop-ForTopics([string]$Why) {  # show what changed against the approved copy, then stop with the approving command
   $Changes = @(Invoke-Py @((Join-Path $Scripts 'hosts.py'), '--store', $Store, '--compare', $Approved))
-  $Summary = if ($Changes.Count -gt 0) { $Changes[0] } else { 'could not compare' }
+  # Only a summary line of the expected shape goes into the error file, which the next session reads.
+  $Summary = 'could not compare'
+  if ($LASTEXITCODE -eq 0 -and $Changes.Count -gt 0 -and $Changes[0] -cmatch '^[0-9]+ source\(s\) added, [0-9]+ removed; hosts not approved before: [a-z0-9.,* -]+$') { $Summary = $Changes[0] }
   $Command = "& '$($PSCommandPath.Replace("'", "''"))' -Project '$($RealProject.Replace("'", "''"))' -ApproveTopics $(Get-Short $TopicsHash)"
   Stop-Run "topics.yaml needs your approval: $Why ($Summary). Review $Topics (the added and removed sources are listed above), then approve this version in PowerShell with: $Command" 7
 }

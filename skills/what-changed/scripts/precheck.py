@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Decide, without a model, whether today's run needs an agent at all.
 
-Usage: python3 precheck.py --store PATH [--today YYYY-MM-DD] [--timeout 20] [--budget 600]
+Usage: python3 precheck.py --store PATH [--today YYYY-MM-DD] [--timeout 20] [--budget 600] [--topics FILE]
+
+--topics reads the watchlist from FILE instead of the store's topics.yaml (the schedulers pass
+the copy you approved). Topics are checked in an order that moves by one each day, so with a
+short --budget it is not always the same ones that are left over.
 
 For every topic in topics.yaml it works out whether the topic is due (cadence,
 claims past review_by, low/disputed claims to re-check) and, for due topics,
@@ -191,31 +195,35 @@ def topic_status(topic: dict, store: Path, today: date, timeout: float,
 
     def total() -> float | None:  # seconds the next fetch may take, or 0 once the run's budget is spent
         return None if deadline is None else max(min(3 * timeout, deadline - time.monotonic()), 0)
-    for url in topic.get("sources", []):
-        if total() == 0:  # not a failure of the source: no "failed n in a row", the next run tries it
-            skipped.append(url)
-            continue
+
+    def fetch_once(url: str) -> dict | None:
+        """fingerprint(url), or None after noting why it gave nothing to compare."""
         allowed = total()
         try:
             r = fingerprint(url, timeout, total=allowed)
         except Exception as e:  # one page's content must not stop the other topics
             failed.append((url, fingerprint_error(url, e)))
-            continue
+            return None
         if not r["ok"] and r["detail"] == TOTAL_TIMEOUT and allowed is not None and allowed < 3 * timeout:
             skipped.append(url)  # cut short by the run's budget, not by the source's own slowness
-            continue
+            return None
         if not r["ok"]:
             failed.append((url, r["detail"]))
+            return None
+        return r
+    for url in topic.get("sources", []):
+        if total() == 0:  # not a failure of the source: no "failed n in a row", the next run tries it
+            skipped.append(url)
+            continue
+        r = fetch_once(url)
+        if r is None:
             continue
         if r["kind"] == "page" and r.get("partial"):
-            if total() != 0:
-                try:
-                    r = fingerprint(url, timeout, total=total())
-                except Exception as e:
-                    failed.append((url, fingerprint_error(url, e)))
-                    continue
-            if not r["ok"]:
-                failed.append((url, r["detail"]))
+            if total() == 0:
+                skipped.append(url)
+                continue
+            r = fetch_once(url)  # a second copy, which may be complete
+            if r is None:
                 continue
             if r.get("partial"):
                 failed.append((url, "download truncated (page hash not comparable)"))
@@ -270,13 +278,15 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--today", default=date.today().isoformat())
     ap.add_argument("--timeout", type=float, default=20.0)
     ap.add_argument("--budget", type=float, default=600.0, help="seconds for all fetches; sources left after that are not checked")
+    ap.add_argument("--topics", help="read the watchlist from this file instead of the store's topics.yaml")
     ap.add_argument("--list-sources", action="store_true", help="print every source URL in topics.yaml and exit")
     args = ap.parse_args(argv[1:])
     store = Path(args.store).expanduser().absolute()
+    topics_file = Path(args.topics).expanduser() if args.topics else store / "topics.yaml"
     today = date.fromisoformat(args.today)
     if args.list_sources:
         try:
-            for t in read_topics(store / "topics.yaml"):
+            for t in read_topics(topics_file):
                 for url in t.get("sources", []):
                     print(url)
         except (OSError, TopicsFormatError) as e:
@@ -288,14 +298,17 @@ def main(argv: list[str]) -> int:
     if future:
         print(f"note: runs.log has runs dated after today ({', '.join(future[:3])}); they will not count")
     try:
-        topics = read_topics(store / "topics.yaml")
+        topics = read_topics(topics_file)
     except (OSError, TopicsFormatError) as e:
         print(f"precheck: cannot read topics.yaml ({e}); run the agent instead")
         return 2
 
     deadline = time.monotonic() + args.budget
     try:
-        results = [(t, *topic_status(t, store, today, args.timeout, deadline)) for t in topics]
+        start = today.toordinal() % len(topics) if topics else 0
+        order = list(range(start, len(topics))) + list(range(start))
+        status = {i: topic_status(topics[i], store, today, args.timeout, deadline) for i in order}
+        results = [(t, *status[i]) for i, t in enumerate(topics)]
     except TopicsFormatError as e:  # e.g. a ledger that is a symlink out of ledger/
         print(f"precheck: {e}; run the agent instead")
         return 2

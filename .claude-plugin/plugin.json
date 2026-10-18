@@ -1,6 +1,6 @@
 {
   "name": "what-changed",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Tells you what changed about the topics you follow since the last run, where each fact came from and how sure it is. Keeps a claim ledger and a daily digest as plain text files in your project.",
   "author": {
     "name": "tonnpeera",

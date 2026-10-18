@@ -9,8 +9,9 @@
 #   WHAT_CHANGED_CLAUDE=/path/to/claude           claude host: which claude to run (optional; default:
 #                                                 ~/.local/bin/claude, where the installer puts it, else PATH)
 #   WHAT_CHANGED_VERSION_TIMEOUT=30               claude host: seconds `claude --version` may take (optional)
-#   WHAT_CHANGED_APPROVE_TOPICS=1                 approve topics.yaml as it is now, after you changed it;
-#                                                 until then a changed topics.yaml stops the run
+#   WHAT_CHANGED_APPROVE_TOPICS=<12 characters>   approve the topics.yaml you reviewed, then exit (runs stop
+#                                                 while topics.yaml differs from the approved copy; the stop
+#                                                 message shows what changed and the exact command)
 #
 # Exits early once it has completed a run today (its own record under ~/.local/state/what-changed/,
 # outside the project, where no host's agent writes), so it is safe to schedule more than once a day.
@@ -77,6 +78,13 @@ esac
 case "$HOST" in claude) ;; *)
   if [ -L "$STORE" ]; then fail "refusing: $STORE is a symlink, and host $HOST can create those" 2; fi ;;
 esac
+# The approved copy of topics.yaml lives in the state folder too, so it must be out of the agent's reach.
+REAL_STATE="$(cd "$STATE_DIR" && pwd -P)"
+case "$REAL_STATE/" in "$REAL_PROJECT/"*)
+  if [ "$HOST" != claude ]; then
+    fail "refusing: the state folder $REAL_STATE is inside $PROJECT, where host $HOST can write. Set XDG_STATE_HOME to a folder outside it." 2
+  fi ;;
+esac
 # Python 3.11 or later. cron and launchd start with a minimal PATH, where python3 may be the 3.9 from
 # Apple's command line tools; WHAT_CHANGED_PYTHON picks one, otherwise the first new enough of these.
 py_ok() { [ -n "$1" ] && "$1" -I -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; }
@@ -121,17 +129,55 @@ PY
 }
 
 cd "$PROJECT"
+
+# topics.yaml decides which hosts precheck fetches and which ones the claude agent may fetch, and
+# other hosts' agents (or an interactive session) can edit it. So the scheduled steps never read it:
+# precheck and hosts.py read a copy you approved, kept here outside the project. A run stops while
+# topics.yaml differs from that copy, and a run whose agent changed it is not counted as done.
+TOPICS="$STORE/topics.yaml"
+APPROVED="$STATE_DIR/$KEY.topics.yaml"
+sha_of() { $SHA < "$1" | cut -d' ' -f1; }
+read_topics_hash() {
+  [ -f "$TOPICS" ] || fail "there is no topics.yaml file in $STORE; add a topic first" 2
+  TOPICS_HASH="$(sha_of "$TOPICS")" || fail "cannot read $TOPICS" 7
+}
+approve() {  # copy topics.yaml as the approved version, if it still is the one with hash $TOPICS_HASH
+  cp "$TOPICS" "$APPROVED.new" && [ "$(sha_of "$APPROVED.new")" = "$TOPICS_HASH" ] && mv "$APPROVED.new" "$APPROVED" \
+    || { rm -f "$APPROVED.new"; fail "could not record the approval of $TOPICS (did it change just now?)" 7; }
+  echo "approved topics.yaml ${TOPICS_HASH:0:12}; scheduled runs fetch only from: $("$PY" -I "$SKILL_DIR/scripts/hosts.py" --store "$STORE" --topics "$APPROVED" --comma)"
+}
+topics_stop() {  # why: show what changed against the approved copy, then stop with the command that approves it
+  CMD="WHAT_CHANGED_APPROVE_TOPICS=${TOPICS_HASH:0:12} WHAT_CHANGED_HOST=$HOST WHAT_CHANGED_PROJECT=$(printf '%q' "$PROJECT") $(printf '%q' "$SKILL_DIR/adapters/scheduler-cron/run-daily.sh")"
+  CHANGES="$("$PY" -I "$SKILL_DIR/scripts/hosts.py" --store "$STORE" --compare "$APPROVED" | head -n 1)" || true
+  fail "topics.yaml needs your approval: $1 (${CHANGES:-could not compare}). Review $TOPICS (the added and removed sources are listed above this line on stderr), then approve this version with: $CMD" 7
+}
+# Approving is a step of its own, which works on a day that already ran: it records the version you
+# reviewed (named by the start of its hash, so a later edit is not approved with it) and exits.
+if [ -n "${WHAT_CHANGED_APPROVE_TOPICS:-}" ]; then
+  read_topics_hash
+  if [ "$WHAT_CHANGED_APPROVE_TOPICS" != "${TOPICS_HASH:0:12}" ]; then
+    topics_stop "it is not the version you approved (its hash starts with ${TOPICS_HASH:0:12}, not $WHAT_CHANGED_APPROVE_TOPICS)"
+  fi
+  approve
+  exit 0
+fi
+
 # One run at a time: a second start (another cron line, launchd catching up after sleep) while a run
 # is still going exits here, and one that waited for it sees its record below. The lock is a symlink
 # to the run's pid (made in one step), so a run that was killed, or a lock older than 6 hours, does
 # not block the next ones.
 LOCK="$STATE_DIR/$KEY.lock"
-if ! ln -s "$$" "$LOCK" 2>/dev/null; then
-  if kill -0 "$(readlink "$LOCK")" 2>/dev/null && [ -z "$(find "$LOCK" -maxdepth 0 -mmin +360 2>/dev/null)" ]; then
-    echo "another run is in progress (pid $(readlink "$LOCK"))"; exit 0
+if [ -e "$LOCK" ] && [ ! -L "$LOCK" ]; then fail "$LOCK is not a lock this script made; remove it" 2; fi
+if ! ln -sn "$$" "$LOCK" 2>/dev/null; then
+  HOLDER="$(readlink "$LOCK")"
+  case "$HOLDER" in ''|0|*[!0-9]*) HOLDER="" ;; esac  # not a pid: stale
+  touch "$LOGDIR/.now"  # a lock dated in the future is stale too
+  if [ -n "$HOLDER" ] && kill -0 "$HOLDER" 2>/dev/null \
+     && [ -z "$(find "$LOCK" -maxdepth 0 \( -mmin +360 -o -newer "$LOGDIR/.now" \) 2>/dev/null)" ]; then
+    echo "another run is in progress (pid $HOLDER)"; exit 0
   fi
   rm -f "$LOCK"
-  ln -s "$$" "$LOCK" 2>/dev/null || { echo "another run is in progress"; exit 0; }
+  ln -sn "$$" "$LOCK" 2>/dev/null || { echo "another run is in progress"; exit 0; }
 fi
 trap '[ "$(readlink "$LOCK")" = "$$" ] && rm -f "$LOCK"' EXIT
 [ "$(readlink "$LOCK")" = "$$" ] || { echo "another run is in progress"; exit 0; }  # two runs removed the same stale lock
@@ -158,17 +204,16 @@ if [ "$HOST" = claude ]; then
   fi
 fi
 
-# topics.yaml decides which hosts precheck fetches and which ones the claude agent may fetch, and
-# other hosts' agents (or an interactive session) can edit it. So precheck and hosts.py read it only
-# while it matches the copy you approved: its hash is kept here, outside the project, recorded on
-# the first run and again whenever you run this script once with WHAT_CHANGED_APPROVE_TOPICS=1.
-APPROVED="$STATE_DIR/$KEY.topics.sha256"
-topics_hash() { if [ -f "$STORE/topics.yaml" ]; then $SHA < "$STORE/topics.yaml" | cut -d' ' -f1; else echo none; fi; }
-TOPICS_HASH="$(topics_hash)"
-if [ "${WHAT_CHANGED_APPROVE_TOPICS:-}" = 1 ] || [ ! -f "$APPROVED" ]; then
-  echo "$TOPICS_HASH" > "$APPROVED"
-elif [ "$(cat "$APPROVED")" != "$TOPICS_HASH" ]; then
-  fail "topics.yaml changed since you approved it. Check $STORE/topics.yaml (its sources are fetched without asking), then run this script once with WHAT_CHANGED_APPROVE_TOPICS=1" 7
+# A new store (no ledger, no runs.log) is approved as it is; anything else needs your approval first.
+read_topics_hash
+if [ ! -f "$APPROVED" ]; then
+  if [ ! -e "$STORE/runs.log" ] && [ -z "$(ls -A "$STORE/ledger" 2>/dev/null)" ]; then
+    printf 'first run of this store: '; approve
+  else
+    topics_stop "there is no approved copy of it yet (a moved project, a new machine or a cleaned state folder)"
+  fi
+elif [ "$(sha_of "$APPROVED")" != "$TOPICS_HASH" ]; then
+  topics_stop "it changed since you approved it"
 fi
 
 # Quiet-day shortcut: a script checks what is due and whether any source changed.
@@ -176,7 +221,7 @@ fi
 # precheck stops fetching after its 600 s budget; LIMIT is the backstop for anything that misses.
 LIMIT=900
 set +e
-"$PY" -I "$SKILL_DIR/scripts/run_limited.py" "$LIMIT" "$SKILL_DIR/scripts/precheck.py" --store "$STORE" 2>&1 | tee "$LOGDIR/$TODAY-precheck.out"
+"$PY" -I "$SKILL_DIR/scripts/run_limited.py" "$LIMIT" "$SKILL_DIR/scripts/precheck.py" --store "$STORE" --topics "$APPROVED" 2>&1 | tee "$LOGDIR/$TODAY-precheck.out"
 PRE=${PIPESTATUS[0]}
 set -e
 if [ "$PRE" -eq 0 ]; then echo "$TODAY" > "$DONE"; exit 0; fi
@@ -210,7 +255,7 @@ case "$HOST" in
       *[[:space:],\(\)]*)
         fail "refusing: permission rules cannot hold a path with spaces, commas or parentheses: $REAL_STORE, $REAL_SKILL, $PY" 2 ;;
     esac
-    ALLOW="$("$PY" -I "$REAL_SKILL/scripts/hosts.py" --store "$REAL_STORE" --allow "${WHAT_CHANGED_FETCH_DOMAINS:-}")" || fail "hosts.py could not build the fetch allowlist" 2
+    ALLOW="$("$PY" -I "$REAL_SKILL/scripts/hosts.py" --store "$REAL_STORE" --topics "$APPROVED" --allow "${WHAT_CHANGED_FETCH_DOMAINS:-}")" || fail "hosts.py could not build the fetch allowlist" 2
     ALLOWED_HOSTS="$(printf '%s\n' "$ALLOW" | sed -n 1p)"
     FETCH="$(printf '%s\n' "$ALLOW" | sed -n 2p)"
     S="$REAL_SKILL/scripts"
@@ -241,8 +286,10 @@ case "$HOST" in
     fail "unknown WHAT_CHANGED_HOST: $HOST" 2 ;;
 esac
 # A run must not change the watchlist: the next runs would fetch whatever it added.
-if [ "$(topics_hash)" != "$TOPICS_HASH" ]; then
-  fail "the agent changed topics.yaml; today is not counted as done. Check $STORE/topics.yaml, then run this script once with WHAT_CHANGED_APPROVE_TOPICS=1" 7
+AFTER="$(sha_of "$TOPICS" 2>/dev/null)" || AFTER="unreadable"
+if [ "$AFTER" != "$TOPICS_HASH" ]; then
+  TOPICS_HASH="$AFTER"
+  topics_stop "the agent changed it during today's run, which is not counted as done"
 fi
 # The agent should have logged today's run with log_run.py. If it wrote today's digest but no log
 # line, log it here; with no digest either, the run did not happen: leave the day open.

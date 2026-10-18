@@ -701,7 +701,7 @@ class _PairSocket(socket.socket):
 def _serve(sock, prefix: bytes, dripped: bytes, tls=None, gap: float = 0.1, stop_after: float = 4.0):
     """A watched server: reads the request, sends prefix at once, then dripped one byte every gap
     seconds (well within the client's per-operation timeout), and gives up after stop_after.
-    With tls (a server SSLContext) it speaks HTTPS."""
+    With tls (a server SSLContext) it speaks HTTPS. prefix None: read the request, then say nothing."""
     try:
         sock.settimeout(stop_after)
         if tls is not None:
@@ -712,6 +712,9 @@ def _serve(sock, prefix: bytes, dripped: bytes, tls=None, gap: float = 0.1, stop
             if not chunk:
                 return
             request += chunk
+        if prefix is None:
+            time.sleep(stop_after)
+            return
         sock.sendall(prefix)
         end = time.monotonic() + stop_after
         for i in range(len(dripped)):
@@ -818,6 +821,26 @@ class SlowServerTests(unittest.TestCase):
             self.assertLess(took, 2.5)
             self.assert_connections_cut()
 
+    def test_a_mute_server_cut_by_the_budget_is_a_total_timeout(self):
+        """The socket timeout is capped at the time left, so the read times out with the deadline:
+        that is still the deadline's doing (not the source's failure), every time."""
+        statuses = []
+        for _ in range(5):
+            with self.serving({"drip.example": (None, b"")}):
+                statuses.append(net.fetch("http://drip.example/", timeout=20.0, total=0.6).status)
+        self.assertEqual(statuses, [net.TOTAL_TIMEOUT] * 5)
+
+    def test_a_slow_name_lookup_counts_toward_the_time_limit(self):
+        real = socket.getaddrinfo
+        def slow(*a, **kw):
+            time.sleep(3)
+            return real(*a, **kw)
+        with mock.patch("urllib.request.getproxies", return_value={}), mock.patch("socket.getaddrinfo", side_effect=slow):
+            start = time.monotonic()
+            r = net.fetch("http://slow-dns.example/", timeout=1.0, total=1.0)
+        self.assertEqual(r.status, net.TOTAL_TIMEOUT)
+        self.assertLess(time.monotonic() - start, 2.0)
+
     def test_a_prompt_server_is_unaffected(self):
         with self.serving({"fast.example": (self.HEAD + self.BODY, b"")}):
             r = net.fetch("http://fast.example/", timeout=1.0, total=1.5)
@@ -900,6 +923,97 @@ class BudgetTests(unittest.TestCase):
                 precheck.main(["precheck.py", "--store", str(store), "--today", "2026-10-15"])  # a full 3 x timeout
             self.assertIn(f"failed (1 in a row): {net.TOTAL_TIMEOUT}", (store / "ledger" / "demo.md").read_text(encoding="utf-8"))
 
+    def test_a_truncated_page_whose_second_copy_fails_is_could_not_check(self):
+        partial = {"url": "u", "ok": True, "kind": "page", "fingerprint": "x | T | 0123456789ab", "detail": "", "partial": True}
+        for second, expect in [({"url": "u", "ok": False, "kind": None, "fingerprint": None, "partial": False, "detail": "HTTP 503"},
+                                "HTTP 503 (failed 1 run(s) in a row)"),
+                               ({"url": "u", "ok": False, "kind": None, "fingerprint": None, "partial": False, "detail": net.TOTAL_TIMEOUT},
+                                "not checked: precheck's 5 s time budget ran out")]:
+            with self.subTest(second=second["detail"]), tempfile.TemporaryDirectory() as d:
+                store = Path(d)
+                (store / "ledger").mkdir()
+                (store / "topics.yaml").write_text(TOPICS, encoding="utf-8")
+                (store / "ledger" / "demo.md").write_text(DEMO_LEDGER.replace('"2.1.296"', '"x | T | 0123456789ab"'), encoding="utf-8")
+                buf = io.StringIO()
+                with mock.patch.object(precheck, "fingerprint", side_effect=[partial, second]), redirect_stdout(buf):
+                    code = precheck.main(["precheck.py", "--store", str(store), "--today", "2026-10-15", "--budget", "5"])
+                self.assertEqual(code, precheck.COULD_NOT_CHECK, buf.getvalue())
+                self.assertIn(expect, (store / "digests" / "2026-10-15.md").read_text(encoding="utf-8"))
+
+    def test_topics_left_over_by_the_budget_change_from_day_to_day(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = Path(d)
+            (store / "ledger").mkdir()
+            (store / "topics.yaml").write_text(TOPICS + TOPICS.split("\n", 1)[1].replace("demo", "other")
+                                               .replace("example.com", "example.org"), encoding="utf-8")
+            (store / "ledger" / "demo.md").write_text(DEMO_LEDGER, encoding="utf-8")
+            (store / "ledger" / "other.md").write_text(DEMO_LEDGER.replace("demo", "other").replace("example.com", "example.org"), encoding="utf-8")
+            ok = {"url": "u", "ok": True, "kind": "changelog", "fingerprint": "2.1.296", "detail": "", "partial": False}
+            first = []
+            for today in ("2026-10-15", "2026-10-16"):
+                fp, calls = self.slow(lambda url: ok)
+                with mock.patch.object(precheck, "fingerprint", side_effect=fp), redirect_stdout(io.StringIO()):
+                    precheck.main(["precheck.py", "--store", str(store), "--today", today, "--budget", "0.2"])
+                first.append(calls[0][0])
+            self.assertEqual(len(set(first)), 2, first)
+
+    def test_verify_quotes_does_not_count_a_quote_it_had_no_time_to_load_again(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = Path(d)
+            (store / "ledger").mkdir()
+            (store / "ledger" / "t.md").write_text("---\ntopic: t\n---\n\n## Claims\n\n### C-001 · claim\n- status: active\n"
+                                                   "- confidence: medium — x\n- sources:\n  - [doc](https://x.example/1) — T1 — read — quote: \"q\"\n"
+                                                   "- counter-evidence: \"x\" 2026-10-14 → none found\n"
+                                                   "- first_seen: 2026-10-14 · last_confirmed: 2026-10-14 · review_by: 2027-01-14\n", encoding="utf-8")
+            fetch, calls = self.slow(lambda url: net.Fetched("<p>other text</p>", "ok", url))
+            out = io.StringIO()
+            with mock.patch.object(verify_quotes, "fetch", side_effect=fetch), redirect_stdout(out):
+                code = verify_quotes.main(["verify_quotes.py", str(store), "--budget", "0.2"])
+            self.assertEqual(code, 0, out.getvalue())
+            self.assertNotIn("NOT FOUND", out.getvalue())
+            self.assertIn("before a second load", out.getvalue())
+
+    def test_watchlist_from_an_approved_copy_and_the_comparison(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = Path(d)
+            (store / "topics.yaml").write_text(TOPICS.replace("      - https://example.com/CHANGELOG.md",
+                                                              "      - https://example.com/CHANGELOG.md\n      - https://new.example/x"), encoding="utf-8")
+            approved = store / "approved.yaml"
+            approved.write_text(TOPICS, encoding="utf-8")
+            out = io.StringIO()
+            with redirect_stdout(out):
+                hosts.main(["hosts.py", "--store", str(store), "--topics", str(approved), "--allow", ""])
+                precheck.main(["precheck.py", "--store", str(store), "--topics", str(approved), "--list-sources"])
+            self.assertEqual(out.getvalue().splitlines(), ["example.com", "WebFetch(domain:example.com)", "https://example.com/CHANGELOG.md"])
+            out, err = io.StringIO(), io.StringIO()
+            from contextlib import redirect_stderr
+            with redirect_stdout(out), redirect_stderr(err):
+                self.assertEqual(hosts.main(["hosts.py", "--store", str(store), "--compare", str(approved)]), 0)
+            self.assertEqual(out.getvalue().strip(), "1 source(s) added, 0 removed; hosts not approved before: new.example")
+            self.assertEqual(err.getvalue().strip(), "+ https://new.example/x")
+
+    @unittest.skipIf(os.name == "nt", "process groups are POSIX; on Windows only the script itself is stopped")
+    def test_run_limited_stops_the_scripts_children_too(self):
+        import run_limited
+        with tempfile.TemporaryDirectory() as d:
+            parent, pidfile = Path(d) / "parent.py", Path(d) / "child.pid"
+            parent.write_text("import subprocess, sys, time\n"
+                              f"c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+                              f"open({str(pidfile)!r}, 'w').write(str(c.pid))\ntime.sleep(30)\n", encoding="utf-8")
+            from contextlib import redirect_stderr
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(run_limited.main(["run_limited.py", "1", str(parent)]), run_limited.TIMED_OUT)
+            pid = int(pidfile.read_text())
+            end = time.monotonic() + 3
+            while time.monotonic() < end:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail(f"the script's child {pid} is still running")
+
     def test_connecting_stops_trying_addresses_when_the_time_is_up(self):
         """A name with many addresses that do not answer would otherwise get a full timeout each."""
         answers = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (f"93.184.215.{i}", 80)) for i in range(1, 30)]
@@ -925,7 +1039,7 @@ class BudgetTests(unittest.TestCase):
             out = io.StringIO()
             with mock.patch.object(verify_quotes, "fetch", side_effect=fetch), redirect_stdout(out):
                 verify_quotes.main(["verify_quotes.py", str(store), "--budget", "0.2"])
-            self.assertEqual([u for u, _ in calls], ["https://x.example/1"])
+            self.assertEqual(len(calls), 1)  # which page comes first moves by one each day
             self.assertLessEqual(calls[0][1], 0.2)
             self.assertEqual(out.getvalue().count("(not checked: the 0.2 s time budget ran out)"), 2)
             calls.clear()
@@ -934,7 +1048,7 @@ class BudgetTests(unittest.TestCase):
                  redirect_stdout(out):
                 verify_quotes.main(["verify_quotes.py", str(store)])
             self.assertEqual(len(calls), 2)
-            self.assertIn("UNREACHABLE t.md C-003 https://x.example/3 (not checked: over 2 pages)", out.getvalue())
+            self.assertEqual(out.getvalue().count("(not checked: over 2 pages)"), 1)
 
     def test_fingerprint_cli_stops_at_its_budget(self):
         fetch, calls = self.slow(lambda url: net.Fetched("## 1.0\n", "ok", url))
@@ -1131,22 +1245,25 @@ class SecurityTests(unittest.TestCase):
         self.assertIsNone(text)
         self.assertIn("redirect", status)
 
-    def run_daily(self, project: Path, skill: Path, host: str):
+    def run_daily(self, project: Path, skill: Path, host: str, state_home: Path | None = None):
         import shutil, subprocess
-        shutil.copytree(ROOT / "skills" / "what-changed", skill)
+        if not skill.exists():
+            shutil.copytree(ROOT / "skills" / "what-changed", skill)
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(project),
                "WHAT_CHANGED_HOST": host, "WHAT_CHANGED_PROJECT": str(project)}
+        if state_home:
+            env["XDG_STATE_HOME"] = str(state_home)
         return subprocess.run(["bash", str(skill / "adapters" / "scheduler-cron" / "run-daily.sh")],
                               env=env, capture_output=True, text=True, timeout=60)
 
-    def store_ran_today(self, project: Path):
+    def store_ran_today(self, project: Path, state_home: Path | None = None):
         store = project / "uptodate"
-        store.mkdir()
+        store.mkdir(exist_ok=True)
         (store / "runs.log").write_text(f"{date.today().isoformat()}T07:00:00+00:00\tscope=all\tdue=1/1\n", encoding="utf-8")
         import hashlib
         key = hashlib.sha256(str(project.resolve()).encode()).hexdigest()[:16]
-        state = project / ".local" / "state" / "what-changed"  # run_daily() sets HOME to the project
-        state.mkdir(parents=True)
+        state = (state_home or project / ".local" / "state") / "what-changed"  # run_daily() sets HOME to the project
+        state.mkdir(parents=True, exist_ok=True)
         (state / f"{key}.last-run").write_text(date.today().isoformat() + "\n", encoding="utf-8")
 
     @POSIX_ONLY
@@ -1175,8 +1292,15 @@ class SecurityTests(unittest.TestCase):
             r = self.run_daily(project, project / ".claude" / "skills" / "what-changed", "claude")
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("already ran today", r.stdout)
+            # Other hosts can write anywhere in the project, here the home folder, so its state folder is refused...
             r = self.run_daily(project, Path(home) / "skills" / "what-changed", "codex")
+            self.assertEqual(r.returncode, 2)
+            self.assertIn("the state folder", r.stderr)
+            # ...and one outside it is fine.
+            self.store_ran_today(project, Path(home) / "state")
+            r = self.run_daily(project, Path(home) / "skills" / "what-changed", "codex", Path(home) / "state")
             self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("already ran today", r.stdout)
 
     @POSIX_ONLY
     def test_module_planted_in_project_is_not_imported(self):
@@ -1309,9 +1433,11 @@ class SchedulerSecurityTests(unittest.TestCase):
                 with self.subTest(extra=bad):
                     self.assertEqual(allow(bad)[0], 2)
 
-    def run_daily_with_fake_claude(self, extra_env=None, prepare=None, root=None):
+    def run_daily_with_fake_claude(self, extra_env=None, prepare=None, root=None, approve=True):
         """run-daily.sh with a stand-in `claude` that records its folder, arguments and env.
-        Pass the root of an earlier call (store.parent.parent) to run again in the same project."""
+        Pass the root of an earlier call (store.parent.parent) to run again in the same project.
+        approve: put an approved copy of topics.yaml in the state folder first, as an earlier
+        approval would have (without it, only a new store is approved on its first run)."""
         import shutil
         d = root or tempfile.mkdtemp()
         project, home, bindir = Path(d) / "project", Path(d) / "home", Path(d) / "bin"
@@ -1330,10 +1456,16 @@ class SchedulerSecurityTests(unittest.TestCase):
         (store / "topics.yaml").write_text(TOPICS, encoding="utf-8")  # no ledger yet: precheck exits 10
         if prepare:
             prepare(store)
+        if approve and (store / "topics.yaml").is_file():
+            state = home / ".local" / "state" / "what-changed"
+            state.mkdir(parents=True, exist_ok=True)
+            key = __import__("hashlib").sha256(str(project.resolve()).encode()).hexdigest()[:16]
+            shutil.copyfile(store / "topics.yaml", state / f"{key}.topics.yaml")
         shutil.copytree(ROOT / "skills" / "what-changed", skill)
         fake = bindir / "claude"
         fake.write_text('#!/bin/sh\n[ "$1" = --version ] && [ -n "$FAKE_HANG" ] && sleep 30\n'
                         '[ "$1" = --version ] && { echo "${FAKE_VERSION:-2.1.300} (Claude Code)"; exit 0; }\n'
+                        '[ -n "$FAKE_SLEEP" ] && sleep "$FAKE_SLEEP"\n'
                         '[ -n "$FAKE_SILENT" ] || { mkdir -p digests; echo "# Digest" > "digests/$(date +%Y-%m-%d).md"; }\n'
                         '{ pwd -P; for a in "$@"; do printf "ARG %s\\n" "$a"; done; '
                         'env | grep "^WHAT_CHANGED_" | sort; echo "USER=$USER"; } > "$RECORD"\n'
@@ -1369,34 +1501,126 @@ class SchedulerSecurityTests(unittest.TestCase):
     @POSIX_ONLY
     def test_a_changed_topics_yaml_waits_for_approval(self):
         """Other hosts' agents can edit topics.yaml, whose hosts precheck fetches and the claude agent
-        may fetch. A run whose agent changed it is not done, and later runs stop before precheck
-        until the file is approved with WHAT_CHANGED_APPROVE_TOPICS=1."""
+        may fetch. A run whose agent changed it is not done; later runs stop before precheck and
+        show what changed; only the version the user reviewed can be approved, also on a day that
+        already ran, and the approval step does not start a run."""
+        import re
         planted = "https://attacker.example/x?leak=1"
         r, lines, tools, store, skill = self.run_daily_with_fake_claude(
-            {"WHAT_CHANGED_HOST": "codex", "FAKE_ADD_SOURCE": planted})
+            {"WHAT_CHANGED_HOST": "codex", "FAKE_ADD_SOURCE": planted}, approve=False)
         root, state = store.parent.parent, store.parent.parent / "home" / ".local" / "state" / "what-changed"
+        self.assertIn("first run of this store: approved topics.yaml", r.stdout)
         self.assertIn(planted, (store / "topics.yaml").read_text(encoding="utf-8"), "the stand-in agent ran")
         self.assertEqual(r.returncode, 7, r.stderr)
-        self.assertIn("the agent changed topics.yaml", r.stderr)
+        self.assertIn("topics.yaml needs your approval: the agent changed it", r.stderr)
+        self.assertIn(f"+ {planted}", r.stderr, "the added source is shown")
+        self.assertIn("hosts not approved before: attacker.example", r.stderr)
         [logdir] = [p for p in state.iterdir() if p.is_dir()]
-        self.assertIn("the agent changed topics.yaml", (logdir / f"{date.today()}-error.txt").read_text(encoding="utf-8"))
+        error = (logdir / f"{date.today()}-error.txt").read_text(encoding="utf-8")
+        self.assertIn("topics.yaml needs your approval", error)
+        self.assertNotIn(planted, error, "only hosts reach the error file, which the next session sees")
         self.assertFalse(list(state.glob("*.last-run")), "the day must not count as done")
         precheck_out = logdir / f"{date.today()}-precheck.out"
         precheck_out.unlink()
 
         r, lines, tools, *_ = self.run_daily_with_fake_claude(root=root)
         self.assertEqual(r.returncode, 7, r.stderr)
-        self.assertIn("topics.yaml changed since you approved it", r.stderr)
-        self.assertFalse(precheck_out.exists(), "precheck must not read an unapproved topics.yaml")
-        self.assertEqual(lines, [], "the agent must not start with the planted host allowed")
-        self.assertFalse(list(state.glob("*.last-run")))
+        self.assertIn("it changed since you approved it", r.stderr)
+        self.assertFalse(precheck_out.exists(), "precheck must not run with an unapproved topics.yaml")
+        self.assertEqual(lines, [], "the agent must not start")
+        sha = re.search(r"WHAT_CHANGED_APPROVE_TOPICS=([0-9a-f]{12}) ", r.stderr).group(1)
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state.parent)}):
+            note = catch_up.message(store, None, True, catch_up.scheduler_error(store, date.today().isoformat()))
+        self.assertIn("Do not run what-changed", note)
+        self.assertNotIn("Before anything else", note, "no autorun of an unapproved watchlist")
 
-        r, lines, tools, *_ = self.run_daily_with_fake_claude({"WHAT_CHANGED_APPROVE_TOPICS": "1"}, root=root)
+        for value in ("1", "0" * 12):
+            r, lines, *_ = self.run_daily_with_fake_claude({"WHAT_CHANGED_APPROVE_TOPICS": value}, root=root)
+            self.assertEqual(r.returncode, 7, r.stderr)
+            self.assertIn("it is not the version you approved", r.stderr)
+        (store / "topics.yaml").write_text((store / "topics.yaml").read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        r, lines, *_ = self.run_daily_with_fake_claude({"WHAT_CHANGED_APPROVE_TOPICS": sha}, root=root)
+        self.assertEqual(r.returncode, 7, "an edit after the review is not approved with it")
+        sha = re.search(r"WHAT_CHANGED_APPROVE_TOPICS=([0-9a-f]{12}) ", r.stderr).group(1)
+        r, lines, *_ = self.run_daily_with_fake_claude({"WHAT_CHANGED_APPROVE_TOPICS": sha}, root=root)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("WebFetch(domain:attacker.example)", tools.split(","), "approved by the operator")
-        r, lines, *_ = self.run_daily_with_fake_claude(root=root)
+        self.assertIn("scheduled runs fetch only from: attacker.example,example.com", r.stdout)
+        self.assertEqual(lines, [], "approving does not start a run")
+
+        r, lines, tools, *_ = self.run_daily_with_fake_claude(root=root)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("already ran today", r.stdout)
+        self.assertIn("WebFetch(domain:attacker.example)", tools.split(","), "approved by the user")
+        # Approving works on a day that already ran, and tomorrow's run would use it.
+        (store / "topics.yaml").write_text(TOPICS, encoding="utf-8")
+        r, *_ = self.run_daily_with_fake_claude(root=root)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, f"already ran today ({date.today()})"))
+        sha = re.search(r"WHAT_CHANGED_APPROVE_TOPICS=([0-9a-f]{12}) ",
+                        self.run_daily_with_fake_claude({"WHAT_CHANGED_APPROVE_TOPICS": "x"}, root=root)[0].stderr).group(1)
+        r, *_ = self.run_daily_with_fake_claude({"WHAT_CHANGED_APPROVE_TOPICS": sha}, root=root)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("approved topics.yaml", r.stdout)
+
+    @POSIX_ONLY
+    def test_a_store_that_is_not_new_needs_an_approval_first(self):
+        def used(store):
+            (store / "runs.log").write_text("2026-10-01T07:00:00+00:00\tscope=all\n", encoding="utf-8")
+        r, lines, *_ = self.run_daily_with_fake_claude(prepare=used, approve=False)
+        self.assertEqual(r.returncode, 7, r.stderr)
+        self.assertIn("there is no approved copy of it yet", r.stderr)
+        self.assertEqual(lines, [])
+
+    @POSIX_ONLY
+    def test_the_run_reads_the_approved_copy_not_topics_yaml(self):
+        """topics.yaml changed while the run is going: precheck and hosts.py still read the approved
+        copy, and the change stops the run at the end."""
+        import threading
+        planted = "      - https://attacker.example/x\n"
+        stop = threading.Event()
+
+        def plant(store):
+            state = store.parent.parent / "home" / ".local" / "state" / "what-changed"
+            def writer():
+                while not stop.is_set():
+                    if list(state.glob("*/*-precheck.out")):
+                        text = (store / "topics.yaml").read_text(encoding="utf-8")
+                        (store / "topics.yaml").write_text(text.replace("    sources:\n", "    sources:\n" + planted), encoding="utf-8")
+                        return
+                    time.sleep(0.005)
+            threading.Thread(target=writer, daemon=True).start()
+        try:
+            r, lines, tools, store, skill = self.run_daily_with_fake_claude({"FAKE_SLEEP": "1"}, prepare=plant)
+        finally:
+            stop.set()
+        self.assertIn(planted, (store / "topics.yaml").read_text(encoding="utf-8"), "the writer ran during the run")
+        self.assertTrue(lines, "the agent ran")
+        self.assertIn("WHAT_CHANGED_ALLOWED_HOSTS=example.com", lines)
+        self.assertNotIn("attacker.example", tools)
+        self.assertEqual(r.returncode, 7, r.stderr)
+
+    @POSIX_ONLY
+    def test_locks_that_this_script_did_not_make(self):
+        import hashlib
+        def lock(kind):
+            def prepare(store):
+                state = store.parent.parent / "home" / ".local" / "state" / "what-changed"
+                state.mkdir(parents=True, exist_ok=True)
+                path = state / (hashlib.sha256(str(store.parent.resolve()).encode()).hexdigest()[:16] + ".lock")
+                if kind == "dir":
+                    path.mkdir()
+                elif kind == "future":
+                    path.symlink_to(str(os.getpid()))
+                    os.utime(path, (time.time() + 86400 * 365, time.time() + 86400 * 365), follow_symlinks=False)
+                else:
+                    path.symlink_to(kind)
+            return prepare
+        r, lines, *_ = self.run_daily_with_fake_claude(prepare=lock("dir"))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("is not a lock this script made", r.stderr)
+        for kind in ("0", "-1", "abc", "future"):
+            with self.subTest(kind):
+                r, lines, *_ = self.run_daily_with_fake_claude(prepare=lock(kind))
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertTrue(lines, "a lock that names no live run is stale")
 
     @POSIX_ONLY
     def test_one_run_at_a_time(self):

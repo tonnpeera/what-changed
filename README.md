@@ -58,6 +58,8 @@ All terms and the full method: [docs/how-it-works.md](docs/how-it-works.md).
    | 11 | No topic that was due could be checked, because none of its sources could be reached. | Read the reason it prints (often a sandbox or proxy blocking the sites) and try again later |
    | any other (not 0, 2, 10 or 11) | precheck itself failed. This is an error, not a quiet day. | Read its output; to check the topics anyway, tell the agent *"Use what-changed: run"* |
 
+   Each page fetch stops after three times `--timeout` (60 seconds by default), and a page that needs longer is listed as could not check; on a very slow link, raise `--timeout`.
+
 5. **Every day, automatically** (optional): tell the agent *"Use what-changed: setup"*. It offers a timer that runs the check every morning, a reminder when you open a session, or both; shows every file it would write; and changes nothing until you say yes. Details: [adapters/README.md](skills/what-changed/adapters/README.md).
 
 ## What you get

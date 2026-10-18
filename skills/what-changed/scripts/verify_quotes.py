@@ -15,6 +15,7 @@ import io
 import re
 import sys
 import time
+from datetime import date
 from pathlib import Path
 
 if sys.version_info < (3, 11):  # keep in step with the README's "You need"
@@ -24,7 +25,7 @@ if sys.version_info < (3, 11):  # keep in step with the README's "You need"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fingerprint import strip_markup, sub_tags, unescape  # noqa: E402
 from ledger import parse_ledger, scoped_ledger_files  # noqa: E402
-from net import fetch  # noqa: E402
+from net import TOTAL_TIMEOUT, fetch  # noqa: E402
 
 MAX_PAGES = 200  # distinct pages fetched per run
 TRANSLATE = str.maketrans({
@@ -124,7 +125,10 @@ def main(argv: list[str]) -> int:
 
     def total() -> float:  # seconds the next fetch may take, 0 once the budget is spent
         return max(min(3 * timeout, end - time.monotonic()), 0)
-    for n, (url, quotes) in enumerate(by_url.items()):
+    # The order moves by one each day, so the pages a budget or MAX_PAGES leaves out are not always the same.
+    pages = list(by_url.items())
+    start = date.today().toordinal() % len(pages) if pages else 0
+    for n, (url, quotes) in enumerate(pages[start:] + pages[:start]):
         if n >= MAX_PAGES or total() == 0:
             why = f"over {MAX_PAGES} pages" if n >= MAX_PAGES else f"the {budget:g} s time budget ran out"
             unreachable += [f"{f} {cid} {url} (not checked: {why})" for f, cid, _ in quotes]
@@ -135,11 +139,18 @@ def main(argv: list[str]) -> int:
             continue
         text = page_text(r.text) if r.text is not None else None
         status = r.status
-        if text is not None and any(quote_key(q) not in text for _, _, q in quotes) and total() > 0:
+        if text is not None and any(quote_key(q) not in text for _, _, q in quotes):
             # Pages can arrive incomplete or vary between loads: fetch once more, keep the longer copy,
-            # and treat the page as partial if either copy was.
-            r2 = fetch(url, timeout, total=total())
-            if r2.text is not None:
+            # and treat the page as partial if either copy was. Without time for that, the quotes not
+            # found are not checked, rather than missing.
+            allowed = total()
+            r2 = fetch(url, timeout, total=allowed) if allowed > 0 else None
+            if r2 is None or (r2.status == TOTAL_TIMEOUT and allowed < 3 * timeout):
+                unchecked = [(f, cid, q) for f, cid, q in quotes if quote_key(q) not in text]
+                unreachable += [f"{f} {cid} {url} (not checked: the {budget:g} s time budget ran out before a second load)"
+                                for f, cid, _ in unchecked]
+                quotes = [x for x in quotes if x not in unchecked]
+            elif r2.text is not None:
                 text2 = page_text(r2.text)
                 if len(text2) > len(text):
                     text = text2

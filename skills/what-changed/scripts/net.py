@@ -374,16 +374,14 @@ def fetch(url: str, timeout: float = 20.0, retries: int = 2, total: float | None
     The whole call takes at most `total` seconds (default 3 x timeout); after that the
     status is TOTAL_TIMEOUT, even if part of the page arrived."""
     url = encode_url(url)
-    why = refused(url)
-    if why:
-        return Fetched(None, why, url)
     deadline = _Deadline(3 * timeout if total is None else total)
     got: list[Fetched] = []
 
     def attempts() -> None:  # in its own thread, so the caller can stop waiting on time
         _current.deadline = deadline
         try:
-            got.append(_attempts(url, timeout, retries, deadline))
+            why = refused(url)  # in here: its DNS lookup counts toward the time limit too
+            got.append(Fetched(None, why, url) if why else _attempts(url, timeout, retries, deadline))
         except BaseException as e:
             got.append(Fetched(None, type(e).__name__, url))
     worker = threading.Thread(target=attempts, name="what-changed fetch", daemon=True)
@@ -392,7 +390,12 @@ def fetch(url: str, timeout: float = 20.0, retries: int = 2, total: float | None
     if worker.is_alive() or deadline.expired or not got:
         deadline.expire()  # cut its connections, so the abandoned thread ends too
         return Fetched(None, TOTAL_TIMEOUT, url)
-    return got[0]
+    r = got[0]
+    # Socket timeouts are capped at the time left, so a read that ran out with the deadline is the
+    # deadline's doing, not the page's.
+    if r.text is None and deadline.left() <= 0.05 and ("TimeoutError" in r.status or "timed out" in r.status):
+        return Fetched(None, TOTAL_TIMEOUT, url)
+    return r
 
 
 def _attempts(url: str, timeout: float, retries: int, deadline: _Deadline) -> Fetched:

@@ -80,11 +80,19 @@ def scheduler_error(store: Path, today: str) -> str | None:
     return lines[-1].split(" did not finish: ", 1)[-1][:400] if lines else None
 
 
+TOPICS_APPROVAL = "topics.yaml needs your approval"  # how the schedulers start that reason
+
+
 def message(store: Path, last: str | None, autorun: bool, error: str | None = None) -> str:
     when = f"last run {last}" if last else "no run recorded yet"
     if error:
         when += f"; the scheduled run reported: {error}"
-    if autorun:
+    if error and error.startswith(TOPICS_APPROVAL):
+        # Its sources may come from an agent: no run, until the user has looked at them.
+        action = ("At the start of your first reply, tell the user in one line that the daily run is stopped until "
+                  "they review topics.yaml and approve it with the scheduler's command. Do not run what-changed "
+                  "and do not run that command yourself: the approval has to come from the user.")
+    elif autorun:
         action = ("Before anything else, use the what-changed skill to run all due topics "
                   "in light mode, then tell the user the digest's top section in two lines.")
     else:

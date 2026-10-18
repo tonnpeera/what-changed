@@ -9,8 +9,9 @@ Schedule it with Task Scheduler (see ../README.md). Not tested on Windows yet; i
   -Claude        full path to claude.exe (optional; or set WHAT_CHANGED_CLAUDE;
                  default: %USERPROFILE%\.local\bin\claude.exe, else the first claude on PATH)
   -Python        Python 3.11 or later (optional; or set WHAT_CHANGED_PYTHON; default: py -3, then python)
-  WHAT_CHANGED_APPROVE_TOPICS=1  approve topics.yaml as it is now, after you changed it; until then a
-                 changed topics.yaml stops the run
+  -ApproveTopics approve the topics.yaml you reviewed, named by the first 12 characters of its hash,
+                 then exit. Runs stop while topics.yaml differs from the approved copy; the stop
+                 message shows what changed and the exact command.
 
 How it differs from run-daily.sh: the agent gets no shell at all. This script runs the skill's
 scripts itself: precheck.py and fingerprint.py before the agent (the fingerprints go into the
@@ -26,7 +27,8 @@ param(
   [string]$Project = $env:WHAT_CHANGED_PROJECT,
   [string]$FetchDomains = $env:WHAT_CHANGED_FETCH_DOMAINS,
   [string]$Claude = $env:WHAT_CHANGED_CLAUDE,
-  [string]$Python = $env:WHAT_CHANGED_PYTHON
+  [string]$Python = $env:WHAT_CHANGED_PYTHON,
+  [string]$ApproveTopics = ''
 )
 # Exit codes of native commands are checked one by one below. 'Stop' would also turn any line a
 # native command writes to stderr into a terminating error on Windows PowerShell 5.1.
@@ -78,12 +80,64 @@ function Stop-Run([string]$Why, [int]$Code) {
 }
 
 if (-not (Test-Path -LiteralPath $Store -PathType Container)) { Stop-Run "no store folder at $Store" 2 }
+
+# topics.yaml decides which hosts precheck and the agent may fetch, and an interactive session can
+# edit it. So the scheduled steps never read it: precheck and hosts.py read a copy you approved, kept
+# here outside the project. A run stops while topics.yaml differs from that copy, and a run whose
+# agent changed it is not counted as done.
+$Scripts = Join-Path $Skill 'scripts'
+$Topics = Join-Path $Store 'topics.yaml'
+$Approved = Join-Path (Join-Path $StateRoot 'what-changed') "$Key.topics.yaml"
+function Get-Sha([string]$Path) {
+  try { (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower() }
+  catch { Stop-Run "cannot read $Path ($($_.Exception.Message))" 7 }
+}
+function Get-Short([string]$Hash) { if ($Hash.Length -ge 12) { $Hash.Substring(0, 12) } else { $Hash } }
+function Read-TopicsHash {
+  if (-not (Test-Path -LiteralPath $Topics -PathType Leaf)) { Stop-Run "there is no topics.yaml file in $Store; add a topic first" 2 }
+  $script:TopicsHash = Get-Sha $Topics
+}
+function Approve-Topics {  # copy topics.yaml as the approved version, if it still is the one with hash $TopicsHash
+  $New = "$Approved.new"
+  try { Copy-Item -LiteralPath $Topics -Destination $New -Force -ErrorAction Stop }
+  catch { Stop-Run "could not record the approval of $Topics ($($_.Exception.Message))" 7 }
+  if ((Get-Sha $New) -ne $TopicsHash) {
+    Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
+    Stop-Run "could not record the approval of $Topics (did it change just now?)" 7
+  }
+  try { Move-Item -LiteralPath $New -Destination $Approved -Force -ErrorAction Stop }
+  catch { Stop-Run "could not record the approval of $Topics ($($_.Exception.Message))" 7 }
+  $Hosts = @(Invoke-Py @((Join-Path $Scripts 'hosts.py'), '--store', $Store, '--topics', $Approved, '--comma'))
+  Write-Host "approved topics.yaml $(Get-Short $TopicsHash); scheduled runs fetch only from: $($Hosts -join ' ')"
+}
+function Stop-ForTopics([string]$Why) {  # show what changed against the approved copy, then stop with the approving command
+  $Changes = @(Invoke-Py @((Join-Path $Scripts 'hosts.py'), '--store', $Store, '--compare', $Approved))
+  $Summary = if ($Changes.Count -gt 0) { $Changes[0] } else { 'could not compare' }
+  $Command = "& '$($PSCommandPath.Replace("'", "''"))' -Project '$($RealProject.Replace("'", "''"))' -ApproveTopics $(Get-Short $TopicsHash)"
+  Stop-Run "topics.yaml needs your approval: $Why ($Summary). Review $Topics (the added and removed sources are listed above), then approve this version in PowerShell with: $Command" 7
+}
+# Approving is a step of its own, which works on a day that already ran: it records the version you
+# reviewed (named by the start of its hash, so a later edit is not approved with it) and exits.
+if ($ApproveTopics) {
+  Read-TopicsHash
+  if ($ApproveTopics -ne (Get-Short $TopicsHash)) {
+    Stop-ForTopics "it is not the version you approved (its hash starts with $(Get-Short $TopicsHash), not $ApproveTopics)"
+  }
+  Approve-Topics
+  exit 0
+}
+
 # One run at a time: a second start while a run is still going exits here,
 # and one that waited for it sees its record below. Windows releases the open lock file
 # when this process ends, however it ends.
 $LockPath = Join-Path (Join-Path $StateRoot 'what-changed') "$Key.lock"
 try { $Lock = [IO.File]::Open($LockPath, 'OpenOrCreate', 'ReadWrite', 'None') }
-catch { Write-Host 'another run is in progress'; exit 0 }
+catch {
+  $Cause = $_.Exception
+  if ($Cause.InnerException) { $Cause = $Cause.InnerException }
+  if (($Cause.HResult -band 0xFFFF) -eq 32) { Write-Host 'another run is in progress'; exit 0 }  # ERROR_SHARING_VIOLATION
+  Stop-Run "cannot open the lock file $LockPath ($($Cause.Message))" 2
+}
 if ((Test-Path -LiteralPath $Done) -and ("$(Get-Content -LiteralPath $Done -Raw)".Trim() -eq $Today)) {
   Write-Host "already ran today ($Today)"; exit 0
 }
@@ -105,31 +159,28 @@ $VersionLine = if ($VersionOut.Count -gt 0) { $VersionOut[0] } else { 'cli_versi
 if ($VersionCode -eq 4) { Stop-Run "$VersionLine; try again later, or raise WHAT_CHANGED_VERSION_TIMEOUT" 3 }
 if ($VersionCode -ne 0) { Stop-Run "$VersionLine; unattended runs use --restricted. Update Claude Code, or set -Claude to another claude" 3 }
 
-# topics.yaml decides which hosts precheck and the agent may fetch, and an interactive session can
-# edit it. So precheck and hosts.py read it only while it matches the copy you approved: its hash is
-# kept here, outside the project, recorded on the first run and again whenever you run this script
-# once with WHAT_CHANGED_APPROVE_TOPICS=1.
-$Approved = Join-Path (Join-Path $StateRoot 'what-changed') "$Key.topics.sha256"
-function Get-TopicsHash {
-  $File = Join-Path $Store 'topics.yaml'
-  if (Test-Path -LiteralPath $File -PathType Leaf) { (Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash.ToLower() } else { 'none' }
-}
-$TopicsHash = Get-TopicsHash
-if ($env:WHAT_CHANGED_APPROVE_TOPICS -eq '1' -or -not (Test-Path -LiteralPath $Approved)) {
-  Set-Content -LiteralPath $Approved -Value $TopicsHash -Encoding ascii
-} elseif ("$(Get-Content -LiteralPath $Approved -Raw)".Trim() -ne $TopicsHash) {
-  Stop-Run "topics.yaml changed since you approved it. Check $Store\topics.yaml (its sources are fetched without asking), then run this script once with WHAT_CHANGED_APPROVE_TOPICS=1" 7
+# A new store (no ledger, no runs.log) is approved as it is; anything else needs your approval first.
+Read-TopicsHash
+if (-not (Test-Path -LiteralPath $Approved -PathType Leaf)) {
+  $Ledgers = @(Get-ChildItem -LiteralPath (Join-Path $Store 'ledger') -Force -ErrorAction SilentlyContinue)
+  if (-not (Test-Path -LiteralPath (Join-Path $Store 'runs.log')) -and $Ledgers.Count -eq 0) {
+    Write-Host -NoNewline 'first run of this store: '
+    Approve-Topics
+  } else {
+    Stop-ForTopics 'there is no approved copy of it yet (a moved project, a new machine or a cleaned state folder)'
+  }
+} elseif ((Get-Sha $Approved) -ne $TopicsHash) {
+  Stop-ForTopics 'it changed since you approved it'
 }
 
 # Quiet-day shortcut: exit 0 = nothing due or changed (digest written, no model, 0 tokens);
 # 11 = no source could be fetched (not counted as done); 10 = an agent is needed.
-$Scripts = Join-Path $Skill 'scripts'
 # The scripts stop fetching after their 600 s budgets; run_limited.py stops them after $Limit
 # seconds as the backstop for anything that misses (exit code 124).
 $Limit = '900'
 $Limited = Join-Path $Scripts 'run_limited.py'
 $PrecheckOut = Join-Path $LogDir "$Today-precheck.out"
-Invoke-Py @($Limited, $Limit, (Join-Path $Scripts 'precheck.py'), '--store', $Store) | Tee-Object -FilePath $PrecheckOut
+Invoke-Py @($Limited, $Limit, (Join-Path $Scripts 'precheck.py'), '--store', $Store, '--topics', $Approved) | Tee-Object -FilePath $PrecheckOut
 $Pre = $LASTEXITCODE
 if ($Pre -eq 0) { Set-Content -LiteralPath $Done -Value $Today -Encoding utf8; exit 0 }
 if ($Pre -eq 124) { Stop-Run "precheck did not finish within $Limit s and was stopped; today is not counted as done" 12 }
@@ -154,7 +205,7 @@ $SkillRule = ConvertTo-RulePath $Skill
 if ("$StoreRule$SkillRule" -match '[\s,()]') { Stop-Run "permission rules cannot hold a path with spaces, commas or parentheses: $RealStore, $Skill" 2 }
 
 # One token (--allow=...), so an empty value survives PowerShell 5.1, which drops empty arguments.
-$Allow = @(Invoke-Py @((Join-Path $Scripts 'hosts.py'), '--store', $RealStore, "--allow=$FetchDomains"))
+$Allow = @(Invoke-Py @((Join-Path $Scripts 'hosts.py'), '--store', $RealStore, '--topics', $Approved, "--allow=$FetchDomains"))
 if ($LASTEXITCODE -ne 0) { Stop-Run 'hosts.py could not build the fetch allowlist' 2 }
 $AllowedHosts = if ($Allow.Count -ge 1) { $Allow[0] } else { '' }
 $Fetch = if ($Allow.Count -ge 2) { $Allow[1] } else { '' }
@@ -164,7 +215,7 @@ $Tools += ",Edit(/$StoreRule/ledger/**),Edit(/$StoreRule/digests/**)"
 
 # Fingerprints from the same script precheck uses, so tomorrow's precheck compares like with like.
 $env:WHAT_CHANGED_ALLOWED_HOSTS = $AllowedHosts
-$Urls = @(Invoke-Py @((Join-Path $Scripts 'precheck.py'), '--store', $RealStore, '--list-sources'))
+$Urls = @(Invoke-Py @((Join-Path $Scripts 'precheck.py'), '--store', $RealStore, '--topics', $Approved, '--list-sources'))
 if ($LASTEXITCODE -ne 0) { Stop-Run 'precheck.py --list-sources could not read topics.yaml' 2 }
 $Prints = @()
 if ($Urls.Count -gt 0) {
@@ -195,8 +246,11 @@ try {
 } finally { Pop-Location }
 if ($AgentExit -ne 0) { Stop-Run "claude exited with code $AgentExit; see $Err" 4 }
 # A run must not change the watchlist: the next runs would fetch whatever it added.
-if ((Get-TopicsHash) -ne $TopicsHash) {
-  Stop-Run "the agent changed topics.yaml; today is not counted as done. Check $Store\topics.yaml, then run this script once with WHAT_CHANGED_APPROVE_TOPICS=1" 7
+$After = 'unreadable'
+try { $After = (Get-FileHash -LiteralPath $Topics -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower() } catch { }
+if ($After -ne $TopicsHash) {
+  $TopicsHash = $After
+  Stop-ForTopics "the agent changed it during today's run, which is not counted as done"
 }
 
 # The run happened only if the agent wrote today's digest.

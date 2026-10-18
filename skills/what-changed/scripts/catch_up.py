@@ -69,6 +69,7 @@ def ran_today(runs_log: Path, today: str) -> bool:
 
 
 TOPICS_APPROVAL = "topics.yaml needs your approval"  # how the schedulers start that reason
+APPROVED_SINCE = "it stopped for topics.yaml, which has been approved since"  # the line an approval adds
 
 
 def state_base(store: Path) -> Path:
@@ -110,7 +111,9 @@ def message(store: Path, last: str | None, autorun: bool, error: str | None = No
     when = f"last run {last}" if last else "no run recorded yet"
     stopped = bool(error and error.startswith(TOPICS_APPROVAL))
     if stopped and approved:
-        error, stopped = "it stopped for topics.yaml, which has been approved since; today's run can start again", False
+        error, stopped = APPROVED_SINCE + "; today's run can start again", False
+    if approved is False and error and error.startswith(APPROVED_SINCE):
+        error = None  # changed again after that approval
     if error:
         when += f"; the scheduled run reported: {error}"
     if approved is False and not stopped:

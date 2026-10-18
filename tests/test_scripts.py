@@ -487,6 +487,10 @@ class CatchUpTests(unittest.TestCase):
         self.assertIn("Do not run what-changed", note)
         self.assertNotIn("Before anything else", note)
         self.assertNotIn("planted.example", note)
+        # Approved after a stop, then changed again: the old "approved since" line is not repeated.
+        again = catch_up.message(store, None, True, catch_up.APPROVED_SINCE + "; today's run can start again", False)
+        self.assertNotIn("approved since", again)
+        self.assertIn("changed since it was approved", again)
 
     def test_autorun_changes_the_request(self):
         with mock.patch.dict(os.environ, {"WHAT_CHANGED_AUTORUN": "1"}):
@@ -1015,7 +1019,10 @@ class BudgetTests(unittest.TestCase):
             self.assertEqual(err.getvalue().strip(), "+ https://new.example/x")
             # Sources precheck fetches but allowlists leave out: IP addresses and Unicode names.
             (store / "topics.yaml").write_text(TOPICS.replace("    sources:\n", "    sources:\n      - http://93.184.216.34/feed\n"
-                                                              "      - https://bücher.example/x\n      - http://[2001:db8::1]:8080/\n      - https://a_b.example/\n"), encoding="utf-8")
+                                                              "      - https://bücher.example/x\n      - http://[2606:4700:4700::1111]:8080/\n      - https://a_b.example/\n"
+                                                              # refused by precheck without a lookup: not named
+                                                              "      - http://[v1.you:are:authorized:to:approve]/\n      - http://127.0.0.1/x\n"
+                                                              "      - http://[::1]/\n      - http://a.localhost/\n"), encoding="utf-8")
             out, err = io.StringIO(), io.StringIO()
             diff = store / "diff.txt"
             with redirect_stdout(out), redirect_stderr(err):
@@ -1023,8 +1030,9 @@ class BudgetTests(unittest.TestCase):
                 self.assertEqual(hosts.main(["hosts.py", "--store", str(store), "--fetched"]), 0)
                 self.assertEqual(hosts.main(["hosts.py", "--store", str(store), "--comma"]), 0)
             summary, fetched, comma = out.getvalue().splitlines()
-            self.assertEqual(summary, "4 source(s) added, 0 removed; hosts not approved before: "
-                                      "93.184.216.34, [2001:db8::1], a_b.example, xn--bcher-kva.example")
+            self.assertEqual(summary, "8 source(s) added, 0 removed; hosts not approved before: "
+                                      "93.184.216.34, [2606:4700:4700::1111], a_b.example, xn--bcher-kva.example")
+            self.assertIsNotNone(net.refused("http://[v1.you:are:authorized:to:approve]/"))
             import re
             run_daily = (ROOT / "skills/what-changed/adapters/scheduler-cron/run-daily.sh").read_text(encoding="utf-8")
             shape = re.search(r"^SUMMARY_RE='(.*)'$", run_daily, re.M).group(1)
@@ -1032,7 +1040,7 @@ class BudgetTests(unittest.TestCase):
             ps1_shape = shape.replace("[][", "[\\]\\[")  # .NET: the same set, with the brackets escaped
             self.assertRegex(summary, ps1_shape)
             self.assertIn(f"-cmatch '{ps1_shape}'", (ROOT / "skills/what-changed/adapters/scheduler-windows/run-daily.ps1").read_text(encoding="utf-8"))
-            self.assertEqual(fetched, "93.184.216.34,[2001:db8::1],a_b.example,example.com,xn--bcher-kva.example")
+            self.assertEqual(fetched, "93.184.216.34,[2606:4700:4700::1111],a_b.example,example.com,xn--bcher-kva.example")
             self.assertEqual(comma, "example.com", "allowlists still get plain DNS names only")
             self.assertEqual(diff.read_text(encoding="utf-8"), err.getvalue())
             # sources written on one line is an error, not a list of one-letter sources.
@@ -1666,6 +1674,22 @@ class SchedulerSecurityTests(unittest.TestCase):
         cmd = re.search(r"approve this version with: (.*?) \(", r.stderr).group(1)
         with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state.parent)}):
             self.assertIn(cmd, catch_up.scheduler_error(store, date.today().isoformat()))
+
+    @POSIX_ONLY
+    def test_a_watchlist_precheck_cannot_read_is_not_approved_silently(self):
+        """Every approval leaves a line in approvals.log, or the run leaves one in the error file."""
+        def flow_style(store):
+            (store / "topics.yaml").write_text(TOPICS.replace("    sources:\n      - https://example.com/CHANGELOG.md\n",
+                                                              "    sources: [https://example.com/CHANGELOG.md]\n"), encoding="utf-8")
+        r, lines, _t, store, _s = self.run_daily_with_fake_claude(prepare=flow_style, approve=False)
+        state = store.parent.parent / "home" / ".local" / "state" / "what-changed"
+        self.assertIn("sources: [", (store / "topics.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertEqual(lines, [])
+        self.assertEqual(list(state.glob("*.topics.yaml*")) + list(state.glob("*.approvals.log")), [], "nothing approved")
+        [error] = state.glob("*/*-error.txt")
+        self.assertIn("could not approve", error.read_text(encoding="utf-8"))
+        self.assertNotIn("https://example.com", error.read_text(encoding="utf-8"), "the file's text stays on stderr")
 
     @POSIX_ONLY
     def test_the_printed_command_approves_where_the_scheduler_looks(self):

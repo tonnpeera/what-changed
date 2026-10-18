@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import ipaddress
 import io
 import re
 import sys
@@ -37,7 +38,7 @@ if sys.version_info < (3, 11):  # keep in step with the README's "You need"
              "python.org or Homebrew (the python3 from Apple's command line tools can be 3.9).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from net import NUMERIC_HOST  # noqa: E402
+from net import NUMERIC_HOST, SAFE_HOST, _private_ip  # noqa: E402
 
 DNS_NAME = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
 
@@ -60,8 +61,8 @@ def _host(url: str) -> str | None:
 
 def fetch_host(url: str) -> str | None:
     """The host precheck would connect to for this URL, as net.refused sees it (Unicode names in
-    the xn-- form, IPv6 in brackets), or None if precheck would refuse it before that. For review
-    only: IP addresses are kept."""
+    the xn-- form, IPv6 in brackets), or None if net.refused turns it down without a lookup (odd
+    characters, private or local addresses). For review only: public IP addresses are kept."""
     try:
         scheme = urllib.parse.urlsplit(url).scheme
         host = http.client.HTTPConnection(urllib.request.Request(url).host or "").host
@@ -69,9 +70,15 @@ def fetch_host(url: str) -> str | None:
             host = host.encode("idna").decode("ascii")
     except (ValueError, UnicodeError, http.client.InvalidURL):
         return None
-    host = host.lower().rstrip(".")
-    if scheme not in ("http", "https") or not re.fullmatch(r"[a-z0-9._:%-]+", host):  # what net.SAFE_HOST lets through
+    host = host.lower()
+    if scheme not in ("http", "https") or not SAFE_HOST.fullmatch(host) or not (host := host.rstrip(".")):
         return None
+    try:
+        if _private_ip(ipaddress.ip_address(host.split("%")[0])):
+            return None
+    except ValueError:
+        if host == "localhost" or host.endswith(".localhost") or NUMERIC_HOST.fullmatch(host):
+            return None
     return f"[{host}]" if ":" in host else host
 
 

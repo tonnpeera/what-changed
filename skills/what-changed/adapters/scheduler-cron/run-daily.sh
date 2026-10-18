@@ -174,12 +174,18 @@ approval_note() {  # why: what changed against the approved copy, and the comman
 }
 topics_stop() { fail "$(approval_note "$1")" 7; }
 approve() {  # copy topics.yaml as the approved version, if it still is the one with hash $TOPICS_HASH
-  if ! cp "$TOPICS" "$APPROVED.new" || [ "$(sha_of "$APPROVED.new")" != "$TOPICS_HASH" ] || ! mv "$APPROVED.new" "$APPROVED"; then
+  if ! cp "$TOPICS" "$APPROVED.new" || [ "$(sha_of "$APPROVED.new")" != "$TOPICS_HASH" ]; then
     rm -f "$APPROVED.new"
     fail "could not record the approval of $TOPICS (did it change just now?)" 7
   fi
+  # A copy the scheduled steps cannot read is not approved (hosts.py says why on stderr).
+  if ! FETCHED="$("$PY" -I "$SKILL_DIR/scripts/hosts.py" --store "$STORE" --topics "$APPROVED.new" --fetched)"; then
+    rm -f "$APPROVED.new"
+    fail "could not approve $TOPICS: it is not in the format precheck reads (one source URL per line under sources:)" 2
+  fi
+  mv "$APPROVED.new" "$APPROVED" || { rm -f "$APPROVED.new"; fail "could not record the approval of $TOPICS" 7; }
   # Each approval is also kept in a log, since cron and launchd logs are easy to miss.
-  APPROVAL="approved topics.yaml ${TOPICS_HASH:0:32} ($1); scheduled runs fetch only from: $("$PY" -I "$SKILL_DIR/scripts/hosts.py" --store "$STORE" --topics "$APPROVED" --fetched)"
+  APPROVAL="approved topics.yaml ${TOPICS_HASH:0:32} ($1); scheduled runs fetch only from: $FETCHED"
   printf '%s %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$APPROVAL" >> "$STATE_DIR/$KEY.approvals.log"
   echo "$APPROVAL"
 }

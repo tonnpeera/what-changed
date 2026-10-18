@@ -135,9 +135,14 @@ function Approve-Topics([string]$How) {  # copy topics.yaml as the approved vers
     Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
     Stop-Run "could not record the approval of $Topics (did it change just now?)" 7
   }
+  # A copy the scheduled steps cannot read is not approved (hosts.py says why on stderr).
+  $Hosts = @(Invoke-Py @((Join-Path $Scripts 'hosts.py'), '--store', $Store, '--topics', $New, '--fetched'))
+  if ($LASTEXITCODE -ne 0) {
+    Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
+    Stop-Run "could not approve ${Topics}: it is not in the format precheck reads (one source URL per line under sources:)" 2
+  }
   try { Move-Item -LiteralPath $New -Destination $Approved -Force -ErrorAction Stop }
   catch { Stop-Run "could not record the approval of $Topics ($($_.Exception.Message))" 7 }
-  $Hosts = @(Invoke-Py @((Join-Path $Scripts 'hosts.py'), '--store', $Store, '--topics', $Approved, '--fetched'))
   # Each approval is also kept in a log, since Task Scheduler drops this output.
   $Approval = "approved topics.yaml $(Get-Short $TopicsHash) ($How); scheduled runs fetch only from: $($Hosts -join ' ')"
   Add-Content -LiteralPath (Join-Path (Join-Path $StateRoot 'what-changed') "$Key.approvals.log") -Encoding utf8 -Value ("{0} {1}" -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:sszzz'), $Approval)
@@ -181,8 +186,11 @@ catch {
 if ((Test-Path -LiteralPath $Done) -and ("$(Get-Content -LiteralPath $Done -Raw)".Trim() -eq $Today)) {
   Write-Host "already ran today ($Today)"
   # A topics.yaml changed since then would stop the next run: say so now, with the command.
-  if (Test-Path -LiteralPath $Topics -PathType Leaf) {
-    Read-TopicsHash
+  # Only a note: a topics.yaml that cannot be read is left to the next run, as in run-daily.sh.
+  $Hash = $null
+  try { $Hash = (Get-FileHash -LiteralPath $Topics -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower() } catch { }
+  if ($Hash) {
+    $script:TopicsHash = $Hash
     $Why = Get-TopicsReason
     if ($Why) { Write-Host "$(Get-ApprovalNote $Why). The next run stops until then." }
   }

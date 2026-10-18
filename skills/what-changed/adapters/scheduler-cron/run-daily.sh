@@ -9,9 +9,10 @@
 #   WHAT_CHANGED_CLAUDE=/path/to/claude           claude host: which claude to run (optional; default:
 #                                                 ~/.local/bin/claude, where the installer puts it, else PATH)
 #   WHAT_CHANGED_VERSION_TIMEOUT=30               claude host: seconds `claude --version` may take (optional)
-#   WHAT_CHANGED_APPROVE_TOPICS=<32 characters>   approve the topics.yaml you reviewed, then exit (runs stop
-#                                                 while topics.yaml differs from the approved copy; the stop
-#                                                 message shows what changed and the exact command)
+#   WHAT_CHANGED_APPROVE_TOPICS=<32 characters>   approve the topics.yaml you reviewed, then exit (the first
+#                                                 scheduled run approves it as it is; later runs stop while it
+#                                                 differs from the approved copy, and the stop message shows
+#                                                 what changed and the exact command)
 #
 # Exits early once it has completed a run today (its own record under ~/.local/state/what-changed/,
 # outside the project, where no host's agent writes), so it is safe to schedule more than once a day.
@@ -136,31 +137,68 @@ cd "$PROJECT"
 # topics.yaml differs from that copy, and a run whose agent changed it is not counted as done.
 TOPICS="$STORE/topics.yaml"
 APPROVED="$STATE_DIR/$KEY.topics.yaml"
+DIFF="$LOGDIR/$TODAY-topics.diff"   # the added and removed sources; cron and Task Scheduler drop stderr
+SUMMARY_RE='^[0-9]+ source\(s\) added, [0-9]+ removed; hosts not approved before: [][a-z0-9.,*: -]+$'
 sha_of() { $SHA < "$1" | cut -d' ' -f1; }
 read_topics_hash() {
   [ -f "$TOPICS" ] || fail "there is no topics.yaml file in $STORE; add a topic first" 2
   TOPICS_HASH="$(sha_of "$TOPICS")" || fail "cannot read $TOPICS" 7
 }
-approve() {  # copy topics.yaml as the approved version, if it still is the one with hash $TOPICS_HASH
-  cp "$TOPICS" "$APPROVED.new" && [ "$(sha_of "$APPROVED.new")" = "$TOPICS_HASH" ] && mv "$APPROVED.new" "$APPROVED" \
-    || { rm -f "$APPROVED.new"; fail "could not record the approval of $TOPICS (did it change just now?)" 7; }
-  echo "approved topics.yaml ${TOPICS_HASH:0:32}; scheduled runs fetch only from: $("$PY" -I "$SKILL_DIR/scripts/hosts.py" --store "$STORE" --topics "$APPROVED" --comma)"
+ran_before() {  # this scheduler has run precheck for this project before (a completed day, or its logs)
+  [ -e "$DONE" ] || [ -n "$(find "$LOGDIR" -maxdepth 1 -name '*.out' -print -quit 2>/dev/null)" ]
 }
-topics_stop() {  # why: show what changed against the approved copy, then stop with the command that approves it
-  CMD="WHAT_CHANGED_APPROVE_TOPICS=${TOPICS_HASH:0:32} WHAT_CHANGED_HOST=$HOST WHAT_CHANGED_PROJECT=$(printf '%q' "$PROJECT") $(printf '%q' "$SKILL_DIR/adapters/scheduler-cron/run-daily.sh")"
-  # Only a summary line of the expected shape goes into the error file, which the next session reads.
-  CHANGES="$("$PY" -I "$SKILL_DIR/scripts/hosts.py" --store "$STORE" --compare "$APPROVED" | head -n 1)" || CHANGES=""
-  printf '%s\n' "$CHANGES" | grep -Eq '^[0-9]+ source\(s\) added, [0-9]+ removed; hosts not approved before: [a-z0-9.,* -]+$' || CHANGES=""
-  fail "topics.yaml needs your approval: $1 (${CHANGES:-could not compare}). Review $TOPICS (the added and removed sources are listed above this line on stderr), then approve this version with: $CMD" 7
+topics_reason() {  # why the scheduled steps cannot use topics.yaml as it is now (prints nothing if they can)
+  if [ ! -f "$APPROVED" ]; then
+    if ran_before; then
+      echo "there is no approved copy of it, but this scheduler has run for this project before (the first run after an update that added this step, or the copy was removed)"
+    fi
+  elif [ "$(sha_of "$APPROVED")" != "$TOPICS_HASH" ]; then
+    echo "it changed since you approved it"
+  fi
+}
+scheduler_cmd() {  # this script's command line with the settings that decide where the approval goes; $1: prefix
+  printf '%sWHAT_CHANGED_HOST=%q WHAT_CHANGED_PROJECT=%q' "${1:-}" "$HOST" "$PROJECT"
+  if [ -n "${XDG_STATE_HOME:-}" ]; then printf ' XDG_STATE_HOME=%q' "$XDG_STATE_HOME"; fi
+  if [ -n "${WHAT_CHANGED_PYTHON:-}" ]; then printf ' WHAT_CHANGED_PYTHON=%q' "$WHAT_CHANGED_PYTHON"; fi
+  printf ' %q' "$SKILL_DIR/adapters/scheduler-cron/run-daily.sh"
+}
+approval_note() {  # why: what changed against the approved copy, and the command that approves this version
+  # The +/- lines go to stderr and $DIFF. Only a summary line of the expected shape is kept here,
+  # because this text goes into the error file, which the next session reads.
+  CHANGES="$("$PY" -I "$SKILL_DIR/scripts/hosts.py" --store "$STORE" --compare "$APPROVED" --diff-out "$DIFF" | head -n 1)" || CHANGES=""
+  printf '%s\n' "$CHANGES" | grep -Eq "$SUMMARY_RE" || CHANGES=""
+  printf 'topics.yaml needs your approval: %s. After you review it, approve this version with: %s (%s; the added and removed sources are listed in %s)' \
+    "$1" "$(scheduler_cmd "WHAT_CHANGED_APPROVE_TOPICS=${TOPICS_HASH:0:32} ")" "${CHANGES:-could not compare}" "$DIFF"
+}
+topics_stop() { fail "$(approval_note "$1")" 7; }
+approve() {  # copy topics.yaml as the approved version, if it still is the one with hash $TOPICS_HASH
+  if ! cp "$TOPICS" "$APPROVED.new" || [ "$(sha_of "$APPROVED.new")" != "$TOPICS_HASH" ] || ! mv "$APPROVED.new" "$APPROVED"; then
+    rm -f "$APPROVED.new"
+    fail "could not record the approval of $TOPICS (did it change just now?)" 7
+  fi
+  echo "approved topics.yaml ${TOPICS_HASH:0:32}; scheduled runs fetch only from: $("$PY" -I "$SKILL_DIR/scripts/hosts.py" --store "$STORE" --topics "$APPROVED" --fetched)"
 }
 # Approving is a step of its own, which works on a day that already ran: it records the version you
 # reviewed (named by the start of its hash, so a later edit is not approved with it) and exits.
 if [ -n "${WHAT_CHANGED_APPROVE_TOPICS:-}" ]; then
   read_topics_hash
-  if [ "$WHAT_CHANGED_APPROVE_TOPICS" != "${TOPICS_HASH:0:32}" ]; then
-    topics_stop "it is not the version you approved (its hash starts with ${TOPICS_HASH:0:32}, not $WHAT_CHANGED_APPROVE_TOPICS)"
+  # 32 to 64 characters of the hash: the 32 the message gives, or all that `shasum -a 256` prints.
+  NAMED="$(printf '%s' "$WHAT_CHANGED_APPROVE_TOPICS" | tr '[:upper:]' '[:lower:]')"
+  case "$NAMED" in *[!0-9a-f]*) NAMED="" ;; esac
+  if [ "${#NAMED}" -lt 32 ] || [ "${TOPICS_HASH:0:${#NAMED}}" != "$NAMED" ]; then
+    topics_stop "it is not the version you named (its hash starts with ${TOPICS_HASH:0:32})"
   fi
   approve
+  if [ "$(cat "$DONE" 2>/dev/null)" = "$TODAY" ]; then
+    echo "today's run already finished; the next scheduled run uses this version"
+  else
+    # If today's run stopped for topics.yaml, say it is approved now, so the catch-up note stops saying it waits.
+    if [ -f "$ERROR_FILE" ] && tail -n 1 "$ERROR_FILE" | grep -q 'did not finish: topics.yaml needs your approval'; then
+      printf '%s what-changed scheduled run did not finish: it stopped for topics.yaml, which has been approved since; today'\''s run can start again\n' \
+        "$(date +%Y-%m-%dT%H:%M:%S%z)" >> "$ERROR_FILE"
+    fi
+    echo "today's run has not finished: to start it now, run the same command without WHAT_CHANGED_APPROVE_TOPICS (or wait for the next scheduled start)"
+  fi
   exit 0
 fi
 
@@ -183,7 +221,14 @@ if ! ln -sn "$$" "$LOCK" 2>/dev/null; then
 fi
 trap '[ "$(readlink "$LOCK")" = "$$" ] && rm -f "$LOCK"' EXIT
 [ "$(readlink "$LOCK")" = "$$" ] || { echo "another run is in progress"; exit 0; }  # two runs removed the same stale lock
-if [ "$(cat "$DONE" 2>/dev/null)" = "$TODAY" ]; then echo "already ran today ($TODAY)"; exit 0; fi
+if [ "$(cat "$DONE" 2>/dev/null)" = "$TODAY" ]; then
+  echo "already ran today ($TODAY)"
+  # A topics.yaml changed since then would stop the next run: say so now, with the command.
+  if [ -f "$TOPICS" ] && TOPICS_HASH="$(sha_of "$TOPICS")" && WHY="$(topics_reason)" && [ -n "$WHY" ]; then
+    echo "$(approval_note "$WHY"). The next run stops until then."
+  fi
+  exit 0
+fi
 
 # Check the agent CLI before anything else, every day: a missing or old CLI must not stay hidden
 # behind quiet days that never start it.
@@ -206,17 +251,15 @@ if [ "$HOST" = claude ]; then
   fi
 fi
 
-# A new store (no ledger, no runs.log) is approved as it is; anything else needs your approval first.
+# The first scheduled run for this project approves topics.yaml as it is then (you have just set it
+# up; the hosts it will fetch from are printed). After that, a change needs your approval, and so does
+# a missing copy once this scheduler has run here (an update that added this step, or a removed copy).
 read_topics_hash
-if [ ! -f "$APPROVED" ]; then
-  if [ ! -e "$STORE/runs.log" ] && [ -z "$(ls -A "$STORE/ledger" 2>/dev/null)" ]; then
-    printf 'first run of this store: '; approve
-  else
-    topics_stop "there is no approved copy of it yet (a moved project, a new machine or a cleaned state folder)"
-  fi
-elif [ "$(sha_of "$APPROVED")" != "$TOPICS_HASH" ]; then
-  topics_stop "it changed since you approved it"
+if [ ! -f "$APPROVED" ] && ! ran_before; then
+  printf 'first scheduled run for this project: '; approve
 fi
+WHY="$(topics_reason)"
+if [ -n "$WHY" ]; then topics_stop "$WHY"; fi
 
 # Quiet-day shortcut: a script checks what is due and whether any source changed.
 # Exit 0 = nothing changed (it writes the quiet-day digest itself; no model, 0 tokens).

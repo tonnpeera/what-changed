@@ -99,6 +99,8 @@ def read_topics(path: Path) -> list[dict]:
         if not m:
             raise TopicsFormatError(f"cannot read line: {raw!r}")
         key, value = m.group(1), m.group(2).strip().strip('"')
+        if key == "sources" and value != "":  # a string here would be read one character at a time
+            raise TopicsFormatError(f"sources must be a list, one URL per line: {raw!r}")
         if value == "":
             list_key = key
             current.setdefault(key, [])

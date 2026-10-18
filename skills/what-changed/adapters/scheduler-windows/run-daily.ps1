@@ -10,8 +10,9 @@ Schedule it with Task Scheduler (see ../README.md). Not tested on Windows yet; i
                  default: %USERPROFILE%\.local\bin\claude.exe, else the first claude on PATH)
   -Python        Python 3.11 or later (optional; or set WHAT_CHANGED_PYTHON; default: py -3, then python)
   -ApproveTopics approve the topics.yaml you reviewed, named by the first 32 characters of its hash,
-                 then exit. Runs stop while topics.yaml differs from the approved copy; the stop
-                 message shows what changed and the exact command.
+                 then exit. The first scheduled run approves it as it is; later runs stop while
+                 it differs from the approved copy, and the stop message shows what changed and
+                 the exact command.
 
 How it differs from run-daily.sh: the agent gets no shell at all. This script runs the skill's
 scripts itself: precheck.py and fingerprint.py before the agent (the fingerprints go into the
@@ -88,6 +89,7 @@ if (-not (Test-Path -LiteralPath $Store -PathType Container)) { Stop-Run "no sto
 $Scripts = Join-Path $Skill 'scripts'
 $Topics = Join-Path $Store 'topics.yaml'
 $Approved = Join-Path (Join-Path $StateRoot 'what-changed') "$Key.topics.yaml"
+$DiffFile = Join-Path $LogDir "$Today-topics.diff"   # the added and removed sources; Task Scheduler drops output
 function Get-Sha([string]$Path) {
   try { (Get-FileHash -LiteralPath $Path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower() }
   catch { Stop-Run "cannot read $Path ($($_.Exception.Message))" 7 }
@@ -96,6 +98,30 @@ function Get-Short([string]$Hash) { if ($Hash.Length -ge 32) { $Hash.Substring(0
 function Read-TopicsHash {
   if (-not (Test-Path -LiteralPath $Topics -PathType Leaf)) { Stop-Run "there is no topics.yaml file in $Store; add a topic first" 2 }
   $script:TopicsHash = Get-Sha $Topics
+}
+function Test-RanBefore {  # this scheduler has run precheck for this project before (a completed day, or its logs)
+  (Test-Path -LiteralPath $Done) -or @(Get-ChildItem -LiteralPath $LogDir -Filter '*.out' -File -ErrorAction SilentlyContinue).Count -gt 0
+}
+function Get-TopicsReason {  # why the scheduled steps cannot use topics.yaml as it is now ('' if they can)
+  if (-not (Test-Path -LiteralPath $Approved -PathType Leaf)) {
+    if (Test-RanBefore) { return 'there is no approved copy of it, but this scheduler has run for this project before (the first run after an update that added this step, or the copy was removed)' }
+    return ''
+  }
+  if ((Get-Sha $Approved) -ne $TopicsHash) { return 'it changed since you approved it' }
+  return ''
+}
+function Get-ApprovalNote([string]$Why) {  # what changed against the approved copy, and the command that approves this version
+  # The +/- lines go to stderr and $DiffFile. Only a summary line of the expected shape is kept here, because
+  # this text goes into the error file, which the next session reads.
+  $Changes = @(Invoke-Py @((Join-Path $Scripts 'hosts.py'), '--store', $Store, '--compare', $Approved, '--diff-out', $DiffFile))
+  $Summary = 'could not compare'
+  if ($LASTEXITCODE -eq 0 -and $Changes.Count -gt 0 -and $Changes[0] -cmatch '^[0-9]+ source\(s\) added, [0-9]+ removed; hosts not approved before: [\]\[a-z0-9.,*: -]+$') { $Summary = $Changes[0] }
+  # Run with -ExecutionPolicy Bypass, as the scheduled task is: a default console may refuse the script.
+  $Command = "powershell -NoProfile -ExecutionPolicy Bypass -File '$($PSCommandPath.Replace("'", "''"))' -Project '$($RealProject.Replace("'", "''"))'"
+  if ($Python) { $Command += " -Python '$($Python.Replace("'", "''"))'" }
+  $Command += " -ApproveTopics $(Get-Short $TopicsHash)"
+  if ($env:XDG_STATE_HOME) { $Command = "`$env:XDG_STATE_HOME='$($env:XDG_STATE_HOME.Replace("'", "''"))'; $Command" }
+  "topics.yaml needs your approval: $Why. After you review it, approve this version in PowerShell with: $Command ($Summary; the added and removed sources are listed in $DiffFile)"
 }
 function Approve-Topics {  # copy topics.yaml as the approved version, if it still is the one with hash $TopicsHash
   $New = "$Approved.new"
@@ -107,25 +133,28 @@ function Approve-Topics {  # copy topics.yaml as the approved version, if it sti
   }
   try { Move-Item -LiteralPath $New -Destination $Approved -Force -ErrorAction Stop }
   catch { Stop-Run "could not record the approval of $Topics ($($_.Exception.Message))" 7 }
-  $Hosts = @(Invoke-Py @((Join-Path $Scripts 'hosts.py'), '--store', $Store, '--topics', $Approved, '--comma'))
+  $Hosts = @(Invoke-Py @((Join-Path $Scripts 'hosts.py'), '--store', $Store, '--topics', $Approved, '--fetched'))
   Write-Host "approved topics.yaml $(Get-Short $TopicsHash); scheduled runs fetch only from: $($Hosts -join ' ')"
-}
-function Stop-ForTopics([string]$Why) {  # show what changed against the approved copy, then stop with the approving command
-  $Changes = @(Invoke-Py @((Join-Path $Scripts 'hosts.py'), '--store', $Store, '--compare', $Approved))
-  # Only a summary line of the expected shape goes into the error file, which the next session reads.
-  $Summary = 'could not compare'
-  if ($LASTEXITCODE -eq 0 -and $Changes.Count -gt 0 -and $Changes[0] -cmatch '^[0-9]+ source\(s\) added, [0-9]+ removed; hosts not approved before: [a-z0-9.,* -]+$') { $Summary = $Changes[0] }
-  $Command = "& '$($PSCommandPath.Replace("'", "''"))' -Project '$($RealProject.Replace("'", "''"))' -ApproveTopics $(Get-Short $TopicsHash)"
-  Stop-Run "topics.yaml needs your approval: $Why ($Summary). Review $Topics (the added and removed sources are listed above), then approve this version in PowerShell with: $Command" 7
 }
 # Approving is a step of its own, which works on a day that already ran: it records the version you
 # reviewed (named by the start of its hash, so a later edit is not approved with it) and exits.
 if ($ApproveTopics) {
   Read-TopicsHash
-  if ($ApproveTopics -ne (Get-Short $TopicsHash)) {
-    Stop-ForTopics "it is not the version you approved (its hash starts with $(Get-Short $TopicsHash), not $ApproveTopics)"
+  # 32 to 64 characters of the hash: the 32 the message gives, or all of what Get-FileHash prints.
+  $Named = $ApproveTopics.ToLower()
+  if ($Named -notmatch '^[0-9a-f]{32,64}$' -or -not $TopicsHash.StartsWith($Named, [StringComparison]::Ordinal)) {
+    Stop-Run (Get-ApprovalNote "it is not the version you named (its hash starts with $(Get-Short $TopicsHash))") 7
   }
   Approve-Topics
+  if ((Test-Path -LiteralPath $Done) -and ("$(Get-Content -LiteralPath $Done -Raw)".Trim() -eq $Today)) {
+    Write-Host "today's run already finished; the next scheduled run uses this version"
+  } else {
+    # If today's run stopped for topics.yaml, say it is approved now, so the catch-up note stops saying it waits.
+    if ((Test-Path -LiteralPath $ErrorFile) -and ("$(Get-Content -LiteralPath $ErrorFile -Tail 1)" -like '*did not finish: topics.yaml needs your approval*')) {
+      Add-Content -LiteralPath $ErrorFile -Encoding utf8 -Value ("{0} what-changed scheduled run did not finish: it stopped for topics.yaml, which has been approved since; today's run can start again" -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:sszzz'))
+    }
+    Write-Host "today's run has not finished: to start it now, run the same command without -ApproveTopics (or wait for the next scheduled start)"
+  }
   exit 0
 }
 
@@ -141,7 +170,14 @@ catch {
   Stop-Run "cannot open the lock file $LockPath ($($Cause.Message))" 2
 }
 if ((Test-Path -LiteralPath $Done) -and ("$(Get-Content -LiteralPath $Done -Raw)".Trim() -eq $Today)) {
-  Write-Host "already ran today ($Today)"; exit 0
+  Write-Host "already ran today ($Today)"
+  # A topics.yaml changed since then would stop the next run: say so now, with the command.
+  if (Test-Path -LiteralPath $Topics -PathType Leaf) {
+    Read-TopicsHash
+    $Why = Get-TopicsReason
+    if ($Why) { Write-Host "$(Get-ApprovalNote $Why). The next run stops until then." }
+  }
+  exit 0
 }
 
 # Check the agent CLI every day, so a missing or old claude does not hide behind quiet days.
@@ -161,19 +197,16 @@ $VersionLine = if ($VersionOut.Count -gt 0) { $VersionOut[0] } else { 'cli_versi
 if ($VersionCode -eq 4) { Stop-Run "$VersionLine; try again later, or raise WHAT_CHANGED_VERSION_TIMEOUT" 3 }
 if ($VersionCode -ne 0) { Stop-Run "$VersionLine; unattended runs use --restricted. Update Claude Code, or set -Claude to another claude" 3 }
 
-# A new store (no ledger, no runs.log) is approved as it is; anything else needs your approval first.
+# The first scheduled run for this project approves topics.yaml as it is then (you have just set it
+# up; the hosts it will fetch from are printed). After that, a change needs your approval, and so does
+# a missing copy once this scheduler has run here (an update that added this step, or a removed copy).
 Read-TopicsHash
-if (-not (Test-Path -LiteralPath $Approved -PathType Leaf)) {
-  $Ledgers = @(Get-ChildItem -LiteralPath (Join-Path $Store 'ledger') -Force -ErrorAction SilentlyContinue)
-  if (-not (Test-Path -LiteralPath (Join-Path $Store 'runs.log')) -and $Ledgers.Count -eq 0) {
-    Write-Host -NoNewline 'first run of this store: '
-    Approve-Topics
-  } else {
-    Stop-ForTopics 'there is no approved copy of it yet (a moved project, a new machine or a cleaned state folder)'
-  }
-} elseif ((Get-Sha $Approved) -ne $TopicsHash) {
-  Stop-ForTopics 'it changed since you approved it'
+if (-not (Test-Path -LiteralPath $Approved -PathType Leaf) -and -not (Test-RanBefore)) {
+  Write-Host -NoNewline 'first scheduled run for this project: '
+  Approve-Topics
 }
+$Why = Get-TopicsReason
+if ($Why) { Stop-Run (Get-ApprovalNote $Why) 7 }
 
 # Quiet-day shortcut: exit 0 = nothing due or changed (digest written, no model, 0 tokens);
 # 11 = no source could be fetched (not counted as done); 10 = an agent is needed.
@@ -252,7 +285,7 @@ $After = 'unreadable'
 try { $After = (Get-FileHash -LiteralPath $Topics -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower() } catch { }
 if ($After -ne $TopicsHash) {
   $TopicsHash = $After
-  Stop-ForTopics "the agent changed it during today's run, which is not counted as done"
+  Stop-Run (Get-ApprovalNote "the agent changed it during today's run, which is not counted as done") 7
 }
 
 # The run happened only if the agent wrote today's digest.

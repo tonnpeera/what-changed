@@ -60,7 +60,7 @@ All terms and the full method: [docs/how-it-works.md](docs/how-it-works.md).
 
    Each page fetch stops after three times `--timeout` (60 seconds by default), and a page that needs longer is listed as could not check; on a very slow link, raise `--timeout`.
 
-5. **Every day, automatically** (optional): tell the agent *"Use what-changed: setup"*. It offers a timer that runs the check every morning, a reminder when you open a session, or both; shows every file it would write; and changes nothing until you say yes. Details: [adapters/README.md](skills/what-changed/adapters/README.md).
+5. **Every day, automatically** (optional): tell the agent *"Use what-changed: setup"*. It offers a timer that runs the check every morning, a reminder when you open a session, or both; shows every file it would write; and changes nothing until you say yes. The timer's first run approves your `topics.yaml` as it is then and prints the hosts it will fetch from; after that, a run stops while `topics.yaml` has changes you have not approved, and its message gives the command that approves them. Updating from a version before 0.1.7 with the timer already set up: its first run after the update stops once for this approval. Details: [adapters/README.md](skills/what-changed/adapters/README.md).
 
 ## What you get
 

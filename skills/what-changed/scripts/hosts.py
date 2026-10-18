@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Print every host a store's scripts may contact, one per line.
 
-Usage: python3 hosts.py --store PATH [--topics FILE] [--comma | --allow EXTRA | --compare APPROVED]
+Usage: python3 hosts.py --store PATH [--topics FILE] [--comma | --fetched | --allow EXTRA | --compare APPROVED [--diff-out FILE]]
 
 Sandboxed agents (for example Claude Code's sandbox) refuse network access to hosts
 that are not allowed; the scripts then report "blocked-local". Review this list, then
@@ -16,16 +16,20 @@ any host: the lines are then "*" and "WebFetch". An odd EXTRA entry exits 2.
 
 --topics reads the watchlist from FILE instead of the store's topics.yaml (the schedulers pass the
 copy you approved). --compare APPROVED compares the watchlist with an approved copy (a missing one
-counts as empty): one summary line on stdout, and the added (+) and removed (-) sources on stderr.
+counts as empty): one summary line on stdout, and the added (+) and removed (-) sources on stderr
+(and in FILE with --diff-out). --fetched and the summary are for people to review, so unlike the
+other lists they include IP addresses, and Unicode names in the xn-- form precheck connects to.
 Standard library only.
 """
 from __future__ import annotations
 
 import argparse
+import http.client
 import io
 import re
 import sys
 import urllib.parse
+import urllib.request
 from pathlib import Path
 
 if sys.version_info < (3, 11):  # keep in step with the README's "You need"
@@ -54,6 +58,23 @@ def _host(url: str) -> str | None:
     return host
 
 
+def fetch_host(url: str) -> str | None:
+    """The host precheck would connect to for this URL, as net.refused sees it (Unicode names in
+    the xn-- form, IPv6 in brackets), or None if precheck would refuse it before that. For review
+    only: IP addresses are kept."""
+    try:
+        scheme = urllib.parse.urlsplit(url).scheme
+        host = http.client.HTTPConnection(urllib.request.Request(url).host or "").host
+        if not host.isascii():
+            host = host.encode("idna").decode("ascii")
+    except (ValueError, UnicodeError, http.client.InvalidURL):
+        return None
+    host = host.lower().rstrip(".")
+    if scheme not in ("http", "https") or not re.fullmatch(r"[a-z0-9.:-]+", host):
+        return None
+    return f"[{host}]" if ":" in host else host
+
+
 def watchlist(store: Path, topics: Path | None = None) -> list[str]:
     """Hosts of the topics.yaml sources. Raises OSError or TopicsFormatError if it cannot be read."""
     from precheck import read_topics
@@ -74,7 +95,7 @@ def compare(approved: Path, current: Path) -> tuple[str, list[str]]:
         return [u for t in read_topics(path) for u in t.get("sources", [])]
     old, new = sources(approved), sources(current)
     added, removed = [u for u in new if u not in old], [u for u in old if u not in new]
-    new_hosts = sorted({h for u in added if (h := _host(u))} - {h for u in old if (h := _host(u))})
+    new_hosts = sorted({h for u in added if (h := fetch_host(u))} - {h for u in old if (h := fetch_host(u))})
     summary = (f"{len(added)} source(s) added, {len(removed)} removed; hosts not approved before: "
                f"{', '.join(new_hosts) or 'none'}")
     printable = lambda u: "".join(c if c.isprintable() else "?" for c in u)  # noqa: E731
@@ -126,7 +147,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--comma", action="store_true", help="print only the watchlist hosts, as one comma-separated line")
     ap.add_argument("--allow", metavar="EXTRA", help="print the hosts an unattended run may fetch and the WebFetch rules")
     ap.add_argument("--topics", help="read the watchlist from this file instead of the store's topics.yaml")
+    ap.add_argument("--fetched", action="store_true",
+                    help="print every host precheck may fetch from, IP addresses included, comma-separated (for review)")
     ap.add_argument("--compare", metavar="APPROVED", help="compare the watchlist with an approved copy")
+    ap.add_argument("--diff-out", metavar="FILE", help="with --compare: also write the +/- lines to FILE")
     a = ap.parse_args(argv[1:])
     store = Path(a.store).expanduser()
     topics = Path(a.topics).expanduser() if a.topics else store / "topics.yaml"
@@ -136,11 +160,25 @@ def main(argv: list[str]) -> int:
             summary, lines = compare(Path(a.compare).expanduser(), topics)
         except (OSError, TopicsFormatError) as e:  # the detail can quote the file: stderr only
             print("could not compare the watchlists")
-            print(f"hosts.py --compare: {e}", file=sys.stderr)
+            lines, summary = [f"hosts.py --compare: {e}"], None
+        if a.diff_out:
+            Path(a.diff_out).write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+        if summary is None:
+            print(lines[0], file=sys.stderr)
             return 2
         print(summary)
         if lines:
             print("\n".join(lines), file=sys.stderr)
+        return 0
+    if a.fetched:
+        from precheck import read_topics, TopicsFormatError
+        try:
+            urls = [u for t in read_topics(topics) for u in t.get("sources", [])]
+            fetched = set(watchlist(store, topics)) | {h for u in urls if (h := fetch_host(u))}
+        except (OSError, TopicsFormatError) as e:
+            print(f"hosts.py --fetched: cannot read {topics} ({e})", file=sys.stderr)
+            return 2
+        print(",".join(sorted(fetched)) or "no hosts")
         return 0
     if a.allow is not None:
         # Only topics.yaml counts here, never the agent-written ledgers. If it cannot be read, stop:

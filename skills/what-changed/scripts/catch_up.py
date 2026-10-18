@@ -68,30 +68,60 @@ def ran_today(runs_log: Path, today: str) -> bool:
     return today in daily_run_dates(runs_log) and written_since(runs_log, today)
 
 
-def scheduler_error(store: Path, today: str) -> str | None:
-    """The last reason the scheduler gave today for not finishing, if any. The schedulers keep it
-    outside the project, under a key made from the project folder (the store's parent)."""
-    state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "what-changed"
-    key = hashlib.sha256(str(store.resolve().parent).encode()).hexdigest()[:16]
-    path = state / key / f"{today}-error.txt"
-    if not path.is_file():
-        return None
-    lines = path.read_text(encoding="utf-8-sig", errors="replace").strip().splitlines()  # PowerShell 5.1 adds a BOM
-    return lines[-1].split(" did not finish: ", 1)[-1][:400] if lines else None
-
-
 TOPICS_APPROVAL = "topics.yaml needs your approval"  # how the schedulers start that reason
 
 
-def message(store: Path, last: str | None, autorun: bool, error: str | None = None) -> str:
+def state_base(store: Path) -> Path:
+    """Where the schedulers keep this project's state: outside the project, under a key made from
+    the project folder (the store's parent). Add ".topics.yaml" for the approved copy, or "/" for logs."""
+    state = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "what-changed"
+    return state / hashlib.sha256(str(store.resolve().parent).encode()).hexdigest()[:16]
+
+
+def error_file(store: Path, today: str) -> Path:
+    return state_base(store) / f"{today}-error.txt"
+
+
+def scheduler_error(store: Path, today: str) -> str | None:
+    """The last reason the scheduler gave today for not finishing, if any. Kept short, except a
+    stop for topics.yaml, whose approval command comes near its end."""
+    path = error_file(store, today)
+    if not path.is_file():
+        return None
+    lines = path.read_text(encoding="utf-8-sig", errors="replace").strip().splitlines()  # PowerShell 5.1 adds a BOM
+    if not lines:
+        return None
+    text = lines[-1].split(" did not finish: ", 1)[-1]
+    return text[:1000 if text.startswith(TOPICS_APPROVAL) else 400]
+
+
+def topics_approved(store: Path) -> bool | None:
+    """Whether topics.yaml is the copy approved for scheduled runs (None: there is no approved copy,
+    so no scheduler has approved one here, or topics.yaml cannot be read)."""
+    approved = state_base(store).with_name(state_base(store).name + ".topics.yaml")
+    try:
+        return approved.read_bytes() == (store / "topics.yaml").read_bytes()
+    except OSError:
+        return None
+
+
+def message(store: Path, last: str | None, autorun: bool, error: str | None = None,
+            approved: bool | None = None, full_text: Path | None = None) -> str:
     when = f"last run {last}" if last else "no run recorded yet"
+    stopped = bool(error and error.startswith(TOPICS_APPROVAL))
+    if stopped and approved:
+        error, stopped = "it stopped for topics.yaml, which has been approved since; today's run can start again", False
     if error:
         when += f"; the scheduled run reported: {error}"
-    if error and error.startswith(TOPICS_APPROVAL):
+    if approved is False and not stopped:
+        when += "; topics.yaml changed since it was approved for scheduled runs"
+    if stopped or approved is False:
         # Its sources may come from an agent: no run, until the user has looked at them.
+        where = f" (the full message is in {full_text})" if stopped and full_text else ""
         action = ("At the start of your first reply, tell the user in one line that the daily run is stopped until "
-                  "they review topics.yaml and approve it with the scheduler's command. Do not run what-changed "
-                  "and do not run that command yourself: the approval has to come from the user.")
+                  "they review topics.yaml and approve it with the scheduler's command" + where + " (running the "
+                  "scheduler by hand also prints it). Do not run what-changed and do not run that command "
+                  "yourself: the approval has to come from the user.")
     elif autorun:
         action = ("Before anything else, use the what-changed skill to run all due topics "
                   "in light mode, then tell the user the digest's top section in two lines.")
@@ -135,7 +165,8 @@ def main() -> int:
         error = scheduler_error(store, today)
     except OSError:
         error = None
-    print(render(message(store, last, os.environ.get("WHAT_CHANGED_AUTORUN") == "1", error), args.format))
+    autorun = os.environ.get("WHAT_CHANGED_AUTORUN") == "1"
+    print(render(message(store, last, autorun, error, topics_approved(store), error_file(store, today)), args.format))
     # The hook runs outside any sandbox: never write through a link an agent planted in the store.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     try:

@@ -70,7 +70,7 @@ def fetch_host(url: str) -> str | None:
     except (ValueError, UnicodeError, http.client.InvalidURL):
         return None
     host = host.lower().rstrip(".")
-    if scheme not in ("http", "https") or not re.fullmatch(r"[a-z0-9.:-]+", host):
+    if scheme not in ("http", "https") or not re.fullmatch(r"[a-z0-9._:%-]+", host):  # what net.SAFE_HOST lets through
         return None
     return f"[{host}]" if ":" in host else host
 

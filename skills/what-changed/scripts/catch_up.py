@@ -120,8 +120,8 @@ def message(store: Path, last: str | None, autorun: bool, error: str | None = No
         where = f" (the full message is in {full_text})" if stopped and full_text else ""
         action = ("At the start of your first reply, tell the user in one line that the daily run is stopped until "
                   "they review topics.yaml and approve it with the scheduler's command" + where + " (running the "
-                  "scheduler by hand also prints it). Do not run what-changed and do not run that command "
-                  "yourself: the approval has to come from the user.")
+                  "scheduler by hand also prints it). Do not run what-changed, do not run that command yourself "
+                  "and do not open the files it names: the approval has to come from the user.")
     elif autorun:
         action = ("Before anything else, use the what-changed skill to run all due topics "
                   "in light mode, then tell the user the digest's top section in two lines.")

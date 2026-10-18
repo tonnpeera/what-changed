@@ -1015,7 +1015,7 @@ class BudgetTests(unittest.TestCase):
             self.assertEqual(err.getvalue().strip(), "+ https://new.example/x")
             # Sources precheck fetches but allowlists leave out: IP addresses and Unicode names.
             (store / "topics.yaml").write_text(TOPICS.replace("    sources:\n", "    sources:\n      - http://93.184.216.34/feed\n"
-                                                              "      - https://bücher.example/x\n      - http://[2001:db8::1]:8080/\n"), encoding="utf-8")
+                                                              "      - https://bücher.example/x\n      - http://[2001:db8::1]:8080/\n      - https://a_b.example/\n"), encoding="utf-8")
             out, err = io.StringIO(), io.StringIO()
             diff = store / "diff.txt"
             with redirect_stdout(out), redirect_stderr(err):
@@ -1023,8 +1023,8 @@ class BudgetTests(unittest.TestCase):
                 self.assertEqual(hosts.main(["hosts.py", "--store", str(store), "--fetched"]), 0)
                 self.assertEqual(hosts.main(["hosts.py", "--store", str(store), "--comma"]), 0)
             summary, fetched, comma = out.getvalue().splitlines()
-            self.assertEqual(summary, "3 source(s) added, 0 removed; hosts not approved before: "
-                                      "93.184.216.34, [2001:db8::1], xn--bcher-kva.example")
+            self.assertEqual(summary, "4 source(s) added, 0 removed; hosts not approved before: "
+                                      "93.184.216.34, [2001:db8::1], a_b.example, xn--bcher-kva.example")
             import re
             run_daily = (ROOT / "skills/what-changed/adapters/scheduler-cron/run-daily.sh").read_text(encoding="utf-8")
             shape = re.search(r"^SUMMARY_RE='(.*)'$", run_daily, re.M).group(1)
@@ -1032,7 +1032,7 @@ class BudgetTests(unittest.TestCase):
             ps1_shape = shape.replace("[][", "[\\]\\[")  # .NET: the same set, with the brackets escaped
             self.assertRegex(summary, ps1_shape)
             self.assertIn(f"-cmatch '{ps1_shape}'", (ROOT / "skills/what-changed/adapters/scheduler-windows/run-daily.ps1").read_text(encoding="utf-8"))
-            self.assertEqual(fetched, "93.184.216.34,[2001:db8::1],example.com,xn--bcher-kva.example")
+            self.assertEqual(fetched, "93.184.216.34,[2001:db8::1],a_b.example,example.com,xn--bcher-kva.example")
             self.assertEqual(comma, "example.com", "allowlists still get plain DNS names only")
             self.assertEqual(diff.read_text(encoding="utf-8"), err.getvalue())
             # sources written on one line is an error, not a list of one-letter sources.
@@ -1563,7 +1563,7 @@ class SchedulerSecurityTests(unittest.TestCase):
         r, lines, tools, store, skill = self.run_daily_with_fake_claude(
             {"WHAT_CHANGED_HOST": "codex", "FAKE_ADD_SOURCE": planted}, approve=False)
         root, state = store.parent.parent, store.parent.parent / "home" / ".local" / "state" / "what-changed"
-        self.assertIn("first scheduled run for this project: approved topics.yaml", r.stdout)
+        self.assertIn("(first scheduled run for this project, as it was then); scheduled runs fetch only from: example.com", r.stdout)
         self.assertIn(planted, (store / "topics.yaml").read_text(encoding="utf-8"), "the stand-in agent ran")
         self.assertEqual(r.returncode, 7, r.stderr)
         self.assertIn("topics.yaml needs your approval: the agent changed it", r.stderr)
@@ -1596,10 +1596,13 @@ class SchedulerSecurityTests(unittest.TestCase):
         self.assertIn(f"WHAT_CHANGED_APPROVE_TOPICS={sha} ", note(), "the note keeps the whole command")
         self.assertNotIn("above this line", note())
 
+        stops = (logdir / f"{date.today()}-error.txt").read_text(encoding="utf-8")
         for value in ("1", "0" * 32, sha[:12], sha[:31]):  # a short prefix is not enough
             r, lines, *_ = self.run_daily_with_fake_claude({"WHAT_CHANGED_APPROVE_TOPICS": value}, root=root)
             self.assertEqual(r.returncode, 7, r.stderr)
             self.assertIn("it is not the version you named", r.stderr)
+        self.assertEqual((logdir / f"{date.today()}-error.txt").read_text(encoding="utf-8"), stops,
+                         "a refused approval is not a stopped run")
         (store / "topics.yaml").write_text((store / "topics.yaml").read_text(encoding="utf-8") + "\n", encoding="utf-8")
         r, lines, *_ = self.run_daily_with_fake_claude({"WHAT_CHANGED_APPROVE_TOPICS": sha}, root=root)
         self.assertEqual(r.returncode, 7, "an edit after the review is not approved with it")
@@ -1612,6 +1615,10 @@ class SchedulerSecurityTests(unittest.TestCase):
         self.assertIn("today's run has not finished: to start it now, run the same command", r.stdout)
         self.assertEqual(lines, [], "approving does not start a run")
         self.assertIn("approved since", note())
+        log = (state / f"{logdir.name}.approvals.log").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(log), 2)
+        self.assertIn("(first scheduled run for this project, as it was then)", log[0])
+        self.assertIn(f"approved topics.yaml {sha} (by you); scheduled runs fetch only from: attacker.example,example.com", log[1])
         self.assertIn("Before anything else", note(), "approved: the stopped day can be run now")
 
         r, lines, tools, *_ = self.run_daily_with_fake_claude(root=root)
@@ -1643,7 +1650,7 @@ class SchedulerSecurityTests(unittest.TestCase):
             (store / "ledger").mkdir()
             (store / "ledger" / "demo.md").write_text("# demo\n", encoding="utf-8")
         r, lines, _t, store, _s = self.run_daily_with_fake_claude(prepare=used, approve=False)
-        self.assertIn("first scheduled run for this project: approved topics.yaml", r.stdout)
+        self.assertIn("(first scheduled run for this project, as it was then); scheduled runs fetch only from: example.com", r.stdout)
         self.assertNotIn("needs your approval", r.stderr)
         self.assertNotEqual(lines, [], "the run went on")
 

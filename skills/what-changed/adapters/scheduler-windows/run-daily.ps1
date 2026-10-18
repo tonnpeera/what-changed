@@ -99,6 +99,10 @@ function Read-TopicsHash {
   if (-not (Test-Path -LiteralPath $Topics -PathType Leaf)) { Stop-Run "there is no topics.yaml file in $Store; add a topic first" 2 }
   $script:TopicsHash = Get-Sha $Topics
 }
+function Test-Changed {  # the approved copy differs from topics.yaml, or cannot be read
+  try { return (Get-FileHash -LiteralPath $Approved -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower() -ne $TopicsHash }
+  catch { return $true }
+}
 function Test-RanBefore {  # this scheduler has run precheck for this project before (a completed day, or its logs)
   (Test-Path -LiteralPath $Done) -or @(Get-ChildItem -LiteralPath $LogDir -Filter '*.out' -File -ErrorAction SilentlyContinue).Count -gt 0
 }
@@ -107,7 +111,7 @@ function Get-TopicsReason {  # why the scheduled steps cannot use topics.yaml as
     if (Test-RanBefore) { return 'there is no approved copy of it, but this scheduler has run for this project before (the first run after an update that added this step, or the copy was removed)' }
     return ''
   }
-  if ((Get-Sha $Approved) -ne $TopicsHash) { return 'it changed since you approved it' }
+  if (Test-Changed) { return 'it changed since you approved it' }
   return ''
 }
 function Get-ApprovalNote([string]$Why) {  # what changed against the approved copy, and the command that approves this version
@@ -115,7 +119,7 @@ function Get-ApprovalNote([string]$Why) {  # what changed against the approved c
   # this text goes into the error file, which the next session reads.
   $Changes = @(Invoke-Py @((Join-Path $Scripts 'hosts.py'), '--store', $Store, '--compare', $Approved, '--diff-out', $DiffFile))
   $Summary = 'could not compare'
-  if ($LASTEXITCODE -eq 0 -and $Changes.Count -gt 0 -and $Changes[0] -cmatch '^[0-9]+ source\(s\) added, [0-9]+ removed; hosts not approved before: [\]\[a-z0-9.,*: -]+$') { $Summary = $Changes[0] }
+  if ($LASTEXITCODE -eq 0 -and $Changes.Count -gt 0 -and $Changes[0] -cmatch '^[0-9]+ source\(s\) added, [0-9]+ removed; hosts not approved before: [\]\[a-z0-9._%,*: -]+$') { $Summary = $Changes[0] }
   # Run with -ExecutionPolicy Bypass, as the scheduled task is: a default console may refuse the script.
   $Command = "powershell -NoProfile -ExecutionPolicy Bypass -File '$($PSCommandPath.Replace("'", "''"))' -Project '$($RealProject.Replace("'", "''"))'"
   if ($Python) { $Command += " -Python '$($Python.Replace("'", "''"))'" }
@@ -123,7 +127,7 @@ function Get-ApprovalNote([string]$Why) {  # what changed against the approved c
   if ($env:XDG_STATE_HOME) { $Command = "`$env:XDG_STATE_HOME='$($env:XDG_STATE_HOME.Replace("'", "''"))'; $Command" }
   "topics.yaml needs your approval: $Why. After you review it, approve this version in PowerShell with: $Command ($Summary; the added and removed sources are listed in $DiffFile)"
 }
-function Approve-Topics {  # copy topics.yaml as the approved version, if it still is the one with hash $TopicsHash
+function Approve-Topics([string]$How) {  # copy topics.yaml as the approved version, if it still is the one with hash $TopicsHash
   $New = "$Approved.new"
   try { Copy-Item -LiteralPath $Topics -Destination $New -Force -ErrorAction Stop }
   catch { Stop-Run "could not record the approval of $Topics ($($_.Exception.Message))" 7 }
@@ -134,7 +138,10 @@ function Approve-Topics {  # copy topics.yaml as the approved version, if it sti
   try { Move-Item -LiteralPath $New -Destination $Approved -Force -ErrorAction Stop }
   catch { Stop-Run "could not record the approval of $Topics ($($_.Exception.Message))" 7 }
   $Hosts = @(Invoke-Py @((Join-Path $Scripts 'hosts.py'), '--store', $Store, '--topics', $Approved, '--fetched'))
-  Write-Host "approved topics.yaml $(Get-Short $TopicsHash); scheduled runs fetch only from: $($Hosts -join ' ')"
+  # Each approval is also kept in a log, since Task Scheduler drops this output.
+  $Approval = "approved topics.yaml $(Get-Short $TopicsHash) ($How); scheduled runs fetch only from: $($Hosts -join ' ')"
+  Add-Content -LiteralPath (Join-Path (Join-Path $StateRoot 'what-changed') "$Key.approvals.log") -Encoding utf8 -Value ("{0} {1}" -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:sszzz'), $Approval)
+  Write-Host $Approval
 }
 # Approving is a step of its own, which works on a day that already ran: it records the version you
 # reviewed (named by the start of its hash, so a later edit is not approved with it) and exits.
@@ -143,9 +150,11 @@ if ($ApproveTopics) {
   # 32 to 64 characters of the hash: the 32 the message gives, or all of what Get-FileHash prints.
   $Named = $ApproveTopics.ToLower()
   if ($Named -notmatch '^[0-9a-f]{32,64}$' -or -not $TopicsHash.StartsWith($Named, [StringComparison]::Ordinal)) {
-    Stop-Run (Get-ApprovalNote "it is not the version you named (its hash starts with $(Get-Short $TopicsHash))") 7
+    # Not a run that stopped: stderr only, the error file is for scheduled runs.
+    [Console]::Error.WriteLine("what-changed: $(Get-ApprovalNote "it is not the version you named (its hash starts with $(Get-Short $TopicsHash))")")
+    exit 7
   }
-  Approve-Topics
+  Approve-Topics 'by you'
   if ((Test-Path -LiteralPath $Done) -and ("$(Get-Content -LiteralPath $Done -Raw)".Trim() -eq $Today)) {
     Write-Host "today's run already finished; the next scheduled run uses this version"
   } else {
@@ -202,8 +211,7 @@ if ($VersionCode -ne 0) { Stop-Run "$VersionLine; unattended runs use --restrict
 # a missing copy once this scheduler has run here (an update that added this step, or a removed copy).
 Read-TopicsHash
 if (-not (Test-Path -LiteralPath $Approved -PathType Leaf) -and -not (Test-RanBefore)) {
-  Write-Host -NoNewline 'first scheduled run for this project: '
-  Approve-Topics
+  Approve-Topics 'first scheduled run for this project, as it was then'
 }
 $Why = Get-TopicsReason
 if ($Why) { Stop-Run (Get-ApprovalNote $Why) 7 }

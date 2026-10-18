@@ -138,14 +138,16 @@ cd "$PROJECT"
 TOPICS="$STORE/topics.yaml"
 APPROVED="$STATE_DIR/$KEY.topics.yaml"
 DIFF="$LOGDIR/$TODAY-topics.diff"   # the added and removed sources; cron and Task Scheduler drop stderr
-SUMMARY_RE='^[0-9]+ source\(s\) added, [0-9]+ removed; hosts not approved before: [][a-z0-9.,*: -]+$'
+SUMMARY_RE='^[0-9]+ source\(s\) added, [0-9]+ removed; hosts not approved before: [][a-z0-9._%,*: -]+$'
 sha_of() { $SHA < "$1" | cut -d' ' -f1; }
 read_topics_hash() {
   [ -f "$TOPICS" ] || fail "there is no topics.yaml file in $STORE; add a topic first" 2
   TOPICS_HASH="$(sha_of "$TOPICS")" || fail "cannot read $TOPICS" 7
 }
 ran_before() {  # this scheduler has run precheck for this project before (a completed day, or its logs)
-  [ -e "$DONE" ] || [ -n "$(find "$LOGDIR" -maxdepth 1 -name '*.out' -print -quit 2>/dev/null)" ]
+  [ -e "$DONE" ] && return 0
+  for f in "$LOGDIR"/*.out; do [ -e "$f" ] && return 0; done
+  return 1
 }
 topics_reason() {  # why the scheduled steps cannot use topics.yaml as it is now (prints nothing if they can)
   if [ ! -f "$APPROVED" ]; then
@@ -176,7 +178,10 @@ approve() {  # copy topics.yaml as the approved version, if it still is the one 
     rm -f "$APPROVED.new"
     fail "could not record the approval of $TOPICS (did it change just now?)" 7
   fi
-  echo "approved topics.yaml ${TOPICS_HASH:0:32}; scheduled runs fetch only from: $("$PY" -I "$SKILL_DIR/scripts/hosts.py" --store "$STORE" --topics "$APPROVED" --fetched)"
+  # Each approval is also kept in a log, since cron and launchd logs are easy to miss.
+  APPROVAL="approved topics.yaml ${TOPICS_HASH:0:32} ($1); scheduled runs fetch only from: $("$PY" -I "$SKILL_DIR/scripts/hosts.py" --store "$STORE" --topics "$APPROVED" --fetched)"
+  printf '%s %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" "$APPROVAL" >> "$STATE_DIR/$KEY.approvals.log"
+  echo "$APPROVAL"
 }
 # Approving is a step of its own, which works on a day that already ran: it records the version you
 # reviewed (named by the start of its hash, so a later edit is not approved with it) and exits.
@@ -186,9 +191,11 @@ if [ -n "${WHAT_CHANGED_APPROVE_TOPICS:-}" ]; then
   NAMED="$(printf '%s' "$WHAT_CHANGED_APPROVE_TOPICS" | tr '[:upper:]' '[:lower:]')"
   case "$NAMED" in *[!0-9a-f]*) NAMED="" ;; esac
   if [ "${#NAMED}" -lt 32 ] || [ "${TOPICS_HASH:0:${#NAMED}}" != "$NAMED" ]; then
-    topics_stop "it is not the version you named (its hash starts with ${TOPICS_HASH:0:32})"
+    # Not a run that stopped: stderr only, the error file is for scheduled runs.
+    echo "what-changed: $(approval_note "it is not the version you named (its hash starts with ${TOPICS_HASH:0:32})")" >&2
+    exit 7
   fi
-  approve
+  approve "by you"
   if [ "$(cat "$DONE" 2>/dev/null)" = "$TODAY" ]; then
     echo "today's run already finished; the next scheduled run uses this version"
   else
@@ -256,7 +263,7 @@ fi
 # a missing copy once this scheduler has run here (an update that added this step, or a removed copy).
 read_topics_hash
 if [ ! -f "$APPROVED" ] && ! ran_before; then
-  printf 'first scheduled run for this project: '; approve
+  approve "first scheduled run for this project, as it was then"
 fi
 WHY="$(topics_reason)"
 if [ -n "$WHY" ]; then topics_stop "$WHY"; fi

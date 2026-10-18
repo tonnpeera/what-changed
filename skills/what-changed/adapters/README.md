@@ -7,7 +7,7 @@ Two layers. Use either or both (default: both).
 
 Both are idempotent: a day that already has an all-topics run (`scope=all`) in `runs.log` is not run again.
 
-**Quiet days cost nothing.** `scripts/precheck.py` (used by `run-daily.sh` and `run-daily.ps1`) works out which topics are due and fingerprints their sources with plain HTTP. If nothing is due or changed, it writes the quiet-day digest itself and the agent is never started. Use the same pattern with any scheduler: run `precheck.py` first and start the agent only on exit code 10. Exit code 11 means no due topic could be checked because none of their sources could be fetched: it writes a "Could not check" section and leaves the day open, so the next run or the catch-up hook tries again. If only some topics could not be checked, the exit code is 0 and the digest lists them; they stay due.
+**Quiet days cost nothing.** `scripts/precheck.py` (used by `run-daily.sh` and `run-daily.ps1`) works out which topics are due and fingerprints their sources with plain HTTP. If nothing is due or changed, it writes the quiet-day digest itself and the agent is never started. Use the same pattern with any scheduler: run `precheck.py` first and start the agent only on exit code 10. Exit code 11 means no due topic could be checked because none of their sources could be fetched: it writes a "Could not check" section and leaves the day open, so the next run or the catch-up hook tries again. If only some topics could not be checked, the exit code is 0 and the digest lists them; they stay due. Any other exit code (not 0, 2, 10 or 11) means precheck itself failed: treat it as an error, never as a quiet day.
 
 ## Where skills live and what each host offers
 

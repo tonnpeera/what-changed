@@ -176,7 +176,7 @@ fi
 # precheck stops fetching after its 600 s budget; LIMIT is the backstop for anything that misses.
 LIMIT=900
 set +e
-"$PY" -I "$SKILL_DIR/scripts/run_limited.py" "$LIMIT" "$SKILL_DIR/scripts/precheck.py" --store "$STORE" | tee "$LOGDIR/$TODAY-precheck.out"
+"$PY" -I "$SKILL_DIR/scripts/run_limited.py" "$LIMIT" "$SKILL_DIR/scripts/precheck.py" --store "$STORE" 2>&1 | tee "$LOGDIR/$TODAY-precheck.out"
 PRE=${PIPESTATUS[0]}
 set -e
 if [ "$PRE" -eq 0 ]; then echo "$TODAY" > "$DONE"; exit 0; fi

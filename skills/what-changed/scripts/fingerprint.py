@@ -96,8 +96,9 @@ def unescape(text: str) -> str:
     int()'s digit limit (4,300 digits); a reference that long is never a real character."""
     try:
         return html.unescape(text)
-    except ValueError:
-        return html.unescape(re.sub(r"&#\d{8,};?", "\ufffd", text))
+    except ValueError:  # same result: drop leading zeros, and any value over 8 digits is U+FFFD anyway
+        return html.unescape(re.sub(r"&#0*([0-9]+;?)", lambda m: "\ufffd" if len(m.group(1).rstrip(";")) > 7
+                                    else "&#" + m.group(1), text))
 
 
 def from_feed(text: str) -> tuple[str, str]:

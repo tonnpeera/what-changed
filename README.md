@@ -53,8 +53,10 @@ All terms and the full method: [docs/how-it-works.md](docs/how-it-works.md).
    | Exit code | Meaning | What to do |
    |---|---|---|
    | 0 | No topic had reached its next check date, or none of the due topics' sources changed. It added a "No change" section to today's report, listing any topic whose sources could not be reached. | Nothing |
+   | 2 | It could not read `topics.yaml` (not in the simple format it reads) or refused to write a file. | Tell the agent: *"Use what-changed: run"* |
    | 10 | A source changed, or a claim is due for a re-check. | Tell the agent: *"Use what-changed: run"* |
    | 11 | No topic that was due could be checked, because none of its sources could be reached. | Read the reason it prints (often a sandbox or proxy blocking the sites) and try again later |
+   | any other (not 0, 2, 10 or 11) | precheck itself failed. This is an error, not a quiet day. | Read its output; to check the topics anyway, tell the agent *"Use what-changed: run"* |
 
 5. **Every day, automatically** (optional): tell the agent *"Use what-changed: setup"*. It offers a timer that runs the check every morning, a reminder when you open a session, or both; shows every file it would write; and changes nothing until you say yes. Details: [adapters/README.md](skills/what-changed/adapters/README.md).
 

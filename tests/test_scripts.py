@@ -243,6 +243,9 @@ class HostilePageTests(unittest.TestCase):
                 self.assertLess(self.best_time(fn, make(n), runs=1), 1.0)  # quadratic code takes many seconds here
                 small = self.best_time(fn, make(n))
                 large = self.best_time(fn, make(4 * n))
+                if large >= 8 * small + 0.01:  # a busy machine: measure once more (quadratic code fails both times)
+                    small = self.best_time(fn, make(n))
+                    large = self.best_time(fn, make(4 * n))
                 self.assertLess(large, 8 * small + 0.01, f"{small:.4f}s -> {large:.4f}s")
 
     def test_hostile_5mb_page_does_not_stall_precheck(self):
@@ -319,16 +322,114 @@ class HostileContentTests(unittest.TestCase):
 
     def test_only_page_charsets_are_used_to_decode(self):
         body = b"a" * 500_000 + b"-" + b"a" * 500_000
-        for charset in ["punycode", "idna", "utf-7", "unicode_escape", "base64", "rot13", "no-such-charset"]:
+        for charset in ["punycode", "idna", "utf-7", "unicode_escape", "base64", "rot13", "no-such-charset", "utf\x008"]:
             with self.subTest(charset=charset):
                 start = time.perf_counter()
                 self.assertEqual(net._decode(body, charset), body.decode())
                 self.assertLess(time.perf_counter() - start, 1.0)
+        # Bytes these codecs read differently from utf-8, so the old code would fail here.
+        for charset, data in [("utf-7", b"+AGE-"), ("unicode_escape", b"\\x41"), ("rot13", b"nop")]:
+            with self.subTest(charset=charset, data=data):
+                self.assertNotEqual(data.decode(charset) if charset != "rot13" else "abc", data.decode())
+                self.assertEqual(net._decode(data, charset), data.decode())
+        self.assertIsNone(net.PAGE_CHARSET.fullmatch("cp65000"), "Windows resolves cp65000 to utf-7")
+        for cp in ("cp1252", "cp874", "cp932", "cp437", "cp1258"):
+            self.assertIsNotNone(net.PAGE_CHARSET.fullmatch(cp), cp)
         for charset, text in [("utf-8", "naïve ✓"), ("windows-1252", "café"), ("ISO-8859-1", "café"), ("shift_jis", "日本"),
                               ("gb18030", "中文"), ("euc-kr", "한국"), ("tis-620", b"\xe4\xb7\xc2".decode("tis-620")),
                               ("utf-16", "x")]:
             with self.subTest(charset=charset):
                 self.assertEqual(net._decode(text.encode(charset), charset), text)
+
+
+class HeaderAndLedgerTests(unittest.TestCase):
+    """Response headers and ledger lines that a watched page or its server controls."""
+
+    def test_content_type_charset_is_read_in_linear_time(self):
+        n = 320_000
+        for name, ctype in [("rfc 2231 punycode", "text/html; charset*=punycode''" + "a" * n + "-" + "a" * n),
+                            ("many semicolons", "text/html" + ";" * n + "; charset=utf-8"),
+                            ("quotes and semicolons", 'text/html; a="' + '";"' * (n // 3))]:
+            with self.subTest(name), mock.patch.object(net, "_open", return_value=_FakeResp(b"caf\xc3\xa9", 5)) as op:
+                op.return_value.headers.replace_header("Content-Type", ctype)
+                start = time.perf_counter()
+                text, status = net.get("https://example.com/p")
+                self.assertLess(time.perf_counter() - start, 0.5)
+                self.assertEqual((text, status), ("café", "ok"))
+        for ctype, body, text in [("text/html; charset=ISO-8859-1", b"caf\xe9", "café"),
+                                  ('text/html; Charset="windows-1252"', b"caf\xe9", "café"),
+                                  ("text/html;charset=shift_jis", "日本".encode("shift_jis"), "日本"),
+                                  ("text/html", b"caf\xc3\xa9", "café")]:
+            with self.subTest(ctype), mock.patch.object(net, "_open", return_value=_FakeResp(body, len(body))) as op:
+                op.return_value.headers.replace_header("Content-Type", ctype)
+                self.assertEqual(net.get("https://example.com/p")[0], text)
+
+    def test_long_character_references_unescape_like_html(self):
+        """The fallback after html.unescape's ValueError gives what html.unescape gives for any
+        reference it can parse: leading zeros dropped, values over 8 digits as U+FFFD."""
+        import html
+        huge = "&#" + "1" * 5000 + ";"
+        for ref in ["&#0000000065;", "&#00000000123456789", "&#1114111;", "&#1114112", "&#9999999;", "&#10000000;",
+                    "&#0;", "&#٦٥;", "&#x41;", "&#65"]:
+            with self.subTest(ref=ref):
+                self.assertEqual(fingerprint.unescape(huge + " " + ref), "\ufffd " + html.unescape(ref))
+        self.assertEqual(fingerprint.unescape(huge + " &#" + "0" * 5000 + "65;"), "\ufffd A")
+        self.assertEqual(fingerprint.unescape(huge + " &#" + "0" * 5000 + ";"), "\ufffd \ufffd")
+
+    def test_a_huge_failure_counter_does_not_stop_precheck(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = Path(d)
+            (store / "ledger").mkdir()
+            (store / "topics.yaml").write_text(TOPICS + TOPICS.split("\n", 1)[1].replace("demo", "other")
+                                               .replace("example.com", "example.org"), encoding="utf-8")
+            (store / "ledger" / "demo.md").write_text(DEMO_LEDGER, encoding="utf-8")
+            (store / "ledger" / "other.md").write_text(DEMO_LEDGER.replace("demo", "other").replace("example.com", "example.org")
+                                                       .replace("— ok", "— failed (" + "9" * 4301 + " in a row): x"), encoding="utf-8")
+            ok = {"url": "u", "ok": True, "kind": "changelog", "fingerprint": "2.1.296", "detail": "", "partial": False}
+            bad = {"url": "u", "ok": False, "kind": None, "fingerprint": None, "partial": False, "detail": "HTTP 503"}
+            with mock.patch.object(precheck, "fingerprint", side_effect=lambda url, t, **kw: ok if "example.com" in url else bad), \
+                 redirect_stdout(io.StringIO()):
+                code = precheck.main(["precheck.py", "--store", str(store), "--today", "2026-10-15"])
+            self.assertEqual(code, 0)
+            self.assertIn("failed (1 in a row): HTTP 503", (store / "ledger" / "other.md").read_text(encoding="utf-8"))
+            self.assertTrue((store / "digests" / "2026-10-15.md").exists())
+
+    def test_ledgers_are_written_only_when_every_one_is_ready(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = Path(d)
+            (store / "ledger").mkdir()
+            (store / "topics.yaml").write_text(TOPICS + TOPICS.split("\n", 1)[1].replace("demo", "other")
+                                               .replace("example.com", "example.org"), encoding="utf-8")
+            (store / "ledger" / "demo.md").write_text(DEMO_LEDGER, encoding="utf-8")
+            (store / "ledger" / "other.md").write_text(DEMO_LEDGER.replace("demo", "other").replace("example.com", "example.org"), encoding="utf-8")
+            ok = {"url": "u", "ok": True, "kind": "changelog", "fingerprint": "2.1.296", "detail": "", "partial": False}
+            real = precheck.touch_ledger
+            def second_fails(path, *a, **kw):
+                if path.name == "other.md":
+                    raise RuntimeError("test")
+                return real(path, *a, **kw)
+            with mock.patch.object(precheck, "fingerprint", return_value=ok), \
+                 mock.patch.object(precheck, "touch_ledger", side_effect=second_fails), redirect_stdout(io.StringIO()):
+                with self.assertRaises(RuntimeError):
+                    precheck.main(["precheck.py", "--store", str(store), "--today", "2026-10-15"])
+            self.assertIn("last_run: 2026-10-14", (store / "ledger" / "demo.md").read_text(encoding="utf-8"))
+            self.assertFalse((store / "digests").exists())
+
+    def test_an_error_on_the_partial_page_retry_is_one_sources_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = Path(d)
+            (store / "ledger").mkdir()
+            (store / "topics.yaml").write_text(TOPICS, encoding="utf-8")
+            (store / "ledger" / "demo.md").write_text(DEMO_LEDGER, encoding="utf-8")
+            partial = {"url": "u", "ok": True, "kind": "page", "fingerprint": "T | H | 1", "detail": "", "partial": True}
+            from contextlib import redirect_stderr
+            err = io.StringIO()
+            with mock.patch.object(precheck, "fingerprint", side_effect=[partial, ValueError("bad page")]), \
+                 redirect_stdout(io.StringIO()), redirect_stderr(err):
+                code = precheck.main(["precheck.py", "--store", str(store), "--today", "2026-10-15"])
+            self.assertEqual(code, precheck.COULD_NOT_CHECK)
+            self.assertIn("fingerprint error: ValueError", (store / "digests" / "2026-10-15.md").read_text(encoding="utf-8"))
+            self.assertIn("ValueError: bad page", err.getvalue(), "the traceback goes to stderr")
 
 
 class CatchUpTests(unittest.TestCase):

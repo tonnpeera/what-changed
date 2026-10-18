@@ -120,18 +120,31 @@ def _context(use_system_ca: bool) -> ssl.SSLContext:
 
 # Charsets a web page is written in. Any other codec Python knows (punycode, idna, utf-7,
 # unicode_escape, base64, ...) is not page text, and some decode in quadratic time: use utf-8.
-PAGE_CHARSET = re.compile(r"utf-8-sig|utf-(?:8|16|32)(?:-[lb]e)?|ascii|iso8859-\d+|cp\d+|mac-[a-z0-9]+|koi8-[a-z]|kz1048|ptcp154"
+# cp numbers are listed: on Windows Python also resolves any installed code page (cp65000 = utf-7).
+PAGE_CHARSET = re.compile(r"utf-8-sig|utf-(?:8|16|32)(?:-[lb]e)?|ascii|iso8859-\d+|mac-[a-z0-9]+|koi8-[a-z]|kz1048|ptcp154"
+                          r"|cp(?:037|273|424|437|500|720|737|775|85[0-8]|86[0-69]|874|875|932|949|950|1006|1026|1125|1140|125[0-8])"
                           r"|hp-roman8|tis-620|shift_jis\w*|euc_\w+|gb2312|gbk|gb18030|big5\w*|hz|johab|iso2022_\w+")
 
 
 def _decode(data: bytes, charset: str) -> str:
     try:
         charset = codecs.lookup(charset).name
-    except LookupError:
+    except (LookupError, ValueError):  # ValueError: e.g. a NUL in the name
         charset = "utf-8"
     if not PAGE_CHARSET.fullmatch(charset):
         charset = "utf-8"
     return data.decode(charset, errors="replace")
+
+
+# The charset parameter, read from the start of Content-Type in one pass. email's own
+# get_content_charset() decodes an RFC 2231 value (charset*=codec''text) with the codec it names,
+# in quadratic time for some, and its parameter parser copies the rest of the header at every ";".
+CHARSET_PARAM = re.compile(r";\s*charset\s*=\s*\"?([^\s;\"]*)", re.I)
+
+
+def _charset(headers) -> str:
+    m = CHARSET_PARAM.search(str(headers.get("Content-Type") or "")[:1000])
+    return (m.group(1) if m else "") or "utf-8"
 
 
 BLOCKED_LOCAL = "blocked by a local proxy or sandbox, not the site: allow this host"
@@ -396,7 +409,7 @@ def _attempts(url: str, timeout: float, retries: int, deadline: _Deadline) -> Fe
                 final = resp.geturl()
                 if urllib.parse.urlsplit(final).scheme not in ("http", "https"):
                     return Fetched(None, "refused: redirected to a non-http(s) URL", final)
-                charset = resp.headers.get_content_charset() or "utf-8"
+                charset = _charset(resp.headers)
                 ctype = resp.headers.get_content_type()
                 length = resp.headers.get("Content-Length")
                 expected = int(length) if length and length.isdigit() and not resp.headers.get("Content-Encoding") else None

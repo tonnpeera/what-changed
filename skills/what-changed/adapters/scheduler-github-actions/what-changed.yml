@@ -64,6 +64,8 @@ jobs:
             --permission-mode dontAsk
             --allowedTools "Read(/uptodate/**),Read(/.claude/skills/what-changed/**),WebSearch,${{ steps.allow.outputs.webfetch }}Edit(/uptodate/ledger/**),Edit(/uptodate/digests/**),Bash(python3 .claude/skills/what-changed/scripts/log_run.py *),Bash(python3 .claude/skills/what-changed/scripts/fingerprint.py *),Bash(python3 .claude/skills/what-changed/scripts/check_ledger.py *),Bash(python3 .claude/skills/what-changed/scripts/verify_quotes.py *)"
       - name: Commit the store
+        # Not after a precheck crash (any other code): its half-done state must not be committed.
+        if: steps.precheck.outputs.code == '0' || steps.precheck.outputs.code == '2' || steps.precheck.outputs.code == '10' || steps.precheck.outputs.code == '11'
         env:
           TOKEN: ${{ github.token }}
         run: |

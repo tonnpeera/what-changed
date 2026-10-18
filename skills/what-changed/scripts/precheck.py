@@ -39,6 +39,7 @@ import io
 import re
 import sys
 import time
+import traceback
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -58,7 +59,7 @@ NEEDS_AGENT = 10
 COULD_NOT_CHECK = 11
 TOPIC_ID = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 STATE_LINE = re.compile(r'^(- (\S+)(?: (?:→|->) \S+)? — fingerprint: .*? — checked: )(\S+)(.*)$', re.M)
-FAILED_IN_A_ROW = re.compile(r"— failed \((\d+) in a row\)")
+FAILED_IN_A_ROW = re.compile(r"— failed \((\d{1,6}) in a row\)")  # a page can put text into this line
 CONTROL = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]+")  # page-made text must stay on its digest line
 POSSIBLY_GONE = 3
 
@@ -198,7 +199,7 @@ def topic_status(topic: dict, store: Path, today: date, timeout: float,
         try:
             r = fingerprint(url, timeout, total=allowed)
         except Exception as e:  # one page's content must not stop the other topics
-            failed.append((url, f"fingerprint error: {type(e).__name__}"))
+            failed.append((url, fingerprint_error(url, e)))
             continue
         if not r["ok"] and r["detail"] == TOTAL_TIMEOUT and allowed is not None and allowed < 3 * timeout:
             skipped.append(url)  # cut short by the run's budget, not by the source's own slowness
@@ -208,7 +209,14 @@ def topic_status(topic: dict, store: Path, today: date, timeout: float,
             continue
         if r["kind"] == "page" and r.get("partial"):
             if total() != 0:
-                r = fingerprint(url, timeout, total=total())
+                try:
+                    r = fingerprint(url, timeout, total=total())
+                except Exception as e:
+                    failed.append((url, fingerprint_error(url, e)))
+                    continue
+            if not r["ok"]:
+                failed.append((url, r["detail"]))
+                continue
             if r.get("partial"):
                 failed.append((url, "download truncated (page hash not comparable)"))
                 continue
@@ -227,11 +235,18 @@ def topic_status(topic: dict, store: Path, today: date, timeout: float,
                                                "next": today + timedelta(days=cadence)}
 
 
-def touch_ledger(store: Path, path: Path, today: str, ok_urls: set[str], failed: dict[str, str],
-                 checked: bool) -> dict[str, int]:
-    """Update Source state: date and "ok" for sources that answered, a failures-in-a-row counter
-    for those that did not. last_run moves only for a topic that was checked. Returns the
-    counters of the failed sources."""
+def fingerprint_error(url: str, e: Exception) -> str:
+    """The digest gets the error's type; stderr (the scheduler's log) gets the traceback."""
+    print(f"precheck: fingerprint error for {url}:", file=sys.stderr)
+    traceback.print_exception(e, limit=8, file=sys.stderr)
+    return f"fingerprint error: {type(e).__name__}"
+
+
+def touch_ledger(path: Path, today: str, ok_urls: set[str], failed: dict[str, str],
+                 checked: bool) -> tuple[str, dict[str, int]]:
+    """The ledger's new text: date and "ok" for sources that answered, a failures-in-a-row counter
+    for those that did not. last_run moves only for a topic that was checked. Also returns the
+    counters of the failed sources. Writes nothing."""
     text = path.read_text(encoding="utf-8", errors="replace")
     if checked:
         text = re.sub(r"^last_run: .*$", f"last_run: {today}", text, count=1, flags=re.M)
@@ -246,10 +261,7 @@ def touch_ledger(store: Path, path: Path, today: str, ok_urls: set[str], failed:
             counts[url] = (int(before.group(1)) if before else 0) + 1
             return head + m.group(3) + f" — failed ({counts[url]} in a row): {failed[url]}"
         return m.group(0)
-    text = STATE_LINE.sub(update, text)
-    with open_in_store(store, path, append=False) as f:
-        f.write(text)
-    return counts
+    return STATE_LINE.sub(update, text), counts
 
 
 def main(argv: list[str]) -> int:
@@ -332,11 +344,18 @@ def main(argv: list[str]) -> int:
         if why:
             print(f"precheck: refusing to write: {why} (a symlink or hard link); run the agent instead")
             return 2
+    # Every new ledger text first, so nothing is written if one of them fails.
+    counts: dict[str, int] = {}
+    texts = []
+    for (t, d), path in zip(quiet + unchecked, ledgers):
+        ok = {line.split(" → ")[0] for line in d.get("lines", [])}
+        text, c = touch_ledger(path, today.isoformat(), ok, dict(d["failed"]), checked=(t, d) in quiet)
+        texts.append(text)
+        counts.update(c)
     try:
-        counts: dict[str, int] = {}
-        for (t, d), path in zip(quiet + unchecked, ledgers):
-            ok = {line.split(" → ")[0] for line in d.get("lines", [])}
-            counts.update(touch_ledger(store, path, today.isoformat(), ok, dict(d["failed"]), checked=(t, d) in quiet))
+        for path, text in zip(ledgers, texts):
+            with open_in_store(store, path, append=False) as f:
+                f.write(text)
     except UnsafeWrite as e:
         print(f"precheck: refusing to write: {e}; run the agent instead")
         return 2

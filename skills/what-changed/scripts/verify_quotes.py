@@ -21,6 +21,7 @@ if sys.version_info < (3, 11):  # keep in step with the README's "You need"
              "python.org or Homebrew (the python3 from Apple's command line tools can be 3.9).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fingerprint import strip_markup, sub_tags  # noqa: E402
 from ledger import parse_ledger, scoped_ledger_files  # noqa: E402
 from net import fetch  # noqa: E402
 
@@ -33,9 +34,25 @@ TRANSLATE = str.maketrans({
 def normalise(text: str) -> str:
     text = html.unescape(text).translate(TRANSLATE).lower()
     text = re.sub(r"[`*_>#|\\]", "", text)
-    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)  # markdown links -> text
+    text = unlink(text)
     text = re.sub(r"\s+", " ", text)
     return re.sub(r" ([.,;:!?)\]])", r"\1", text).strip()  # "costs <b>$5</b>." -> "costs $5."
+
+
+def unlink(text: str) -> str:
+    r"""Markdown links -> text: re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text) in linear time
+    (that regex rescans to the next "]" or ")" from every "[" that does not start a link)."""
+    out, pos, at = [], 0, 0
+    while (i := text.find("[", at)) != -1 and (j := text.find("]", i + 1)) != -1:
+        k = text.find(")", j + 2) if text.startswith("(", j + 1) else -1
+        if k == -1:
+            if text.startswith("(", j + 1):
+                break  # no ")" after this "](", so none after a later one
+            at = j + 1  # every "[" before j finds the same "]" and fails the same way
+            continue
+        out += [text[pos:i], text[i + 1:j]]
+        pos = at = k + 1
+    return "".join(out) + text[pos:]
 
 
 def quote_key(quote: str) -> str:
@@ -51,11 +68,11 @@ def looks_like_html(raw: str) -> bool:
 
 def page_text(raw: str) -> str:
     if looks_like_html(raw):  # leave Markdown/plain text alone: `<skill-name>` is content there
-        raw = re.sub(r"(?is)<(script|style|noscript)\b.*?</\1>", " ", raw)
+        raw = strip_markup(raw, tags=False)
         # Inline tags sit inside words in languages written without spaces (Thai, Chinese,
         # Japanese), so drop them without adding a space; other tags end a block of text.
-        raw = re.sub(r"(?is)</?(?:a|abbr|b|bdi|bdo|cite|code|data|dfn|em|font|i|kbd|mark|q|s|samp|small|span|strong|sub|sup|time|u|var|wbr)\b[^>]*>", "", raw)
-        raw = re.sub(r"(?s)<[^>]+>", " ", raw)
+        raw = sub_tags(r"(?is)</?(?:a|abbr|b|bdi|bdo|cite|code|data|dfn|em|font|i|kbd|mark|q|s|samp|small|span|strong|sub|sup|time|u|var|wbr)\b[^>]*>", "", raw)
+        raw = sub_tags(r"(?s)<[^>]+>", " ", raw)
     return normalise(raw)
 
 

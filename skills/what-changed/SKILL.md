@@ -3,7 +3,7 @@ name: what-changed
 description: Keeps a dated, source-labelled ledger of what is known about topics the user follows, and on each run (usually daily) reports which claims are new, changed, superseded or disputed, where each came from and how confident it is. Use when the user asks to track a topic, get a daily/weekly update or digest, check "what changed since last time", stay up to date on a product, field, policy or market, add or review a watchlist topic, or run the scheduled update.
 license: MIT
 metadata:
-  version: "0.1.0"
+  version: "0.1.1"
 ---
 
 # what-changed

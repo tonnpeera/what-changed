@@ -56,6 +56,7 @@ COULD_NOT_CHECK = 11
 TOPIC_ID = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 STATE_LINE = re.compile(r'^(- (\S+)(?: (?:→|->) \S+)? — fingerprint: .*? — checked: )(\S+)(.*)$', re.M)
 FAILED_IN_A_ROW = re.compile(r"— failed \((\d+) in a row\)")
+CONTROL = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]+")  # page-made text must stay on its digest line
 POSSIBLY_GONE = 3
 
 
@@ -200,7 +201,7 @@ def topic_status(topic: dict, store: Path, today: date, timeout: float) -> tuple
                              "a new baseline is needed"), {}
         if comparable(old, None) != comparable(r["fingerprint"], r["kind"]):
             return "agent", f"source changed: {url}: {old} → {r['fingerprint']}", {}
-        lines.append(f"{url} → {r['fingerprint']}")
+        lines.append(f"{url} → {CONTROL.sub(' ', r['fingerprint'])}")
     if failed and not lines:  # nothing was compared: that is "could not check", never "no change"
         return "unchecked", "could not check any source", {"failed": failed}
     return "quiet", "fingerprints unchanged", {"lines": lines, "failed": failed, "next": today + timedelta(days=cadence)}
@@ -326,7 +327,7 @@ def main(argv: list[str]) -> int:
     for t, d in unchecked + quiet:
         for url, detail in d["failed"]:
             gone = " — possibly gone: consider replacing or removing it" if counts.get(url, 0) >= POSSIBLY_GONE else ""
-            could_not.append(f"- [{t['id']}] {url} — {detail} (failed {counts.get(url, 1)} run(s) in a row){gone}")
+            could_not.append(f"- [{t['id']}] {url} — {CONTROL.sub(' ', detail)} (failed {counts.get(url, 1)} run(s) in a row){gone}")
     section += [f"- not due: [{t['id']}] ({reason})" for t, reason in not_due]
     if could_not:
         section += ["", "### Could not check"] + could_not

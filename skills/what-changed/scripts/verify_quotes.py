@@ -10,7 +10,6 @@ manual look. Standard library only.
 """
 from __future__ import annotations
 
-import html
 import io
 import re
 import sys
@@ -21,7 +20,7 @@ if sys.version_info < (3, 11):  # keep in step with the README's "You need"
              "python.org or Homebrew (the python3 from Apple's command line tools can be 3.9).")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fingerprint import strip_markup, sub_tags  # noqa: E402
+from fingerprint import strip_markup, sub_tags, unescape  # noqa: E402
 from ledger import parse_ledger, scoped_ledger_files  # noqa: E402
 from net import fetch  # noqa: E402
 
@@ -32,7 +31,7 @@ TRANSLATE = str.maketrans({
 
 
 def normalise(text: str) -> str:
-    text = html.unescape(text).translate(TRANSLATE).lower()
+    text = unescape(text).translate(TRANSLATE).lower()
     text = re.sub(r"[`*_>#|\\]", "", text)
     text = unlink(text)
     text = re.sub(r"\s+", " ", text)

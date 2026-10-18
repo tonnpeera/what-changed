@@ -86,7 +86,16 @@ def first(open_tag: str, close_tag: str, text: str) -> str:
     inner = text[gt + 1:end.start()]
     k = inner.rfind(">") + 1
     inner = re.sub(r"<[^>]+>|\s+", " ", inner[:k]) + re.sub(r"\s+", " ", inner[k:])
-    return LINE_BREAKS.sub(" ", html.unescape(inner)).strip()
+    return LINE_BREAKS.sub(" ", unescape(inner)).strip()
+
+
+def unescape(text: str) -> str:
+    """html.unescape, which raises ValueError for a decimal character reference longer than
+    int()'s digit limit (4,300 digits); a reference that long is never a real character."""
+    try:
+        return html.unescape(text)
+    except ValueError:
+        return html.unescape(re.sub(r"&#\d{8,};?", "\ufffd", text))
 
 
 def from_feed(text: str) -> tuple[str, str]:

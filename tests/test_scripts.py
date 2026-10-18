@@ -214,9 +214,9 @@ class HostilePageTests(unittest.TestCase):
     """A watched page is untrusted: it must not cost quadratic time or add lines to the digest."""
 
     @staticmethod
-    def best_time(fn, arg) -> float:
+    def best_time(fn, arg, runs: int = 5) -> float:
         times = []
-        for _ in range(3):
+        for _ in range(runs):
             start = time.perf_counter()
             fn(arg)
             times.append(time.perf_counter() - start)
@@ -235,13 +235,15 @@ class HostilePageTests(unittest.TestCase):
             "<a": (verify_quotes.page_text, lambda n: "<html>" + "<a" * (n // 2)),
             "<style>": (verify_quotes.page_text, lambda n: "<html>" + "<style>" * (n // 7)),
         }
-        n = 200_000
+        # Four times the input: linear code takes about 4x as long, quadratic code about 16x. The
+        # bound sits between the two, and the best of several runs keeps timer noise out of it.
+        n = 250_000
         for name, (fn, make) in payloads.items():
             with self.subTest(payload=name):
+                self.assertLess(self.best_time(fn, make(n), runs=1), 1.0)  # quadratic code takes many seconds here
                 small = self.best_time(fn, make(n))
-                self.assertLess(small, 1.0)  # the quadratic version takes several seconds here
-                double = self.best_time(fn, make(2 * n))
-                self.assertLess(double, 2.2 * small + 0.005, f"{small:.4f}s -> {double:.4f}s")
+                large = self.best_time(fn, make(4 * n))
+                self.assertLess(large, 8 * small + 0.01, f"{small:.4f}s -> {large:.4f}s")
 
     def test_hostile_5mb_page_does_not_stall_precheck(self):
         url = "https://example.com/status"
@@ -292,6 +294,41 @@ class HostilePageTests(unittest.TestCase):
             self.assertEqual(sum(line.startswith("- [") for line in digest), 1, digest)
             _, failures = check_ledger.check([store / "ledger" / "demo.md"], [store])
             self.assertEqual(failures, [])
+
+
+class HostileContentTests(unittest.TestCase):
+    """Page content and response headers come from the watched site."""
+
+    def test_huge_character_reference_does_not_crash(self):
+        ref = "&#" + "1" * 4301 + ";"
+        for body in [f"<html><title>{ref}</title><h1>x</h1></html>", f"<html><title>t</title><h1>{ref}</h1></html>",
+                     f"<rss><item><title>{ref}</title><pubDate>{ref}</pubDate></item></rss>"]:
+            with self.subTest(body=body[:20]):
+                with mock.patch.object(fingerprint, "fetch", return_value=net.Fetched(body, "ok", "https://x/")):
+                    self.assertTrue(fingerprint.fingerprint("https://x/", 5)["ok"])
+                self.assertIn("\ufffd", verify_quotes.page_text(body))
+        self.assertEqual(fingerprint.unescape("&#65;&#0000000066;&amp;"), "AB&")  # ordinary references unchanged
+
+    def test_a_source_that_raises_is_could_not_check(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = PrecheckTests.make_store(self, d)
+            with mock.patch.object(precheck, "fingerprint", side_effect=ValueError("bad page")), redirect_stdout(io.StringIO()):
+                code = precheck.main(["precheck.py", "--store", str(store), "--today", "2026-10-15"])
+            self.assertEqual(code, precheck.COULD_NOT_CHECK)
+            self.assertIn("fingerprint error: ValueError", (store / "digests" / "2026-10-15.md").read_text(encoding="utf-8"))
+
+    def test_only_page_charsets_are_used_to_decode(self):
+        body = b"a" * 500_000 + b"-" + b"a" * 500_000
+        for charset in ["punycode", "idna", "utf-7", "unicode_escape", "base64", "rot13", "no-such-charset"]:
+            with self.subTest(charset=charset):
+                start = time.perf_counter()
+                self.assertEqual(net._decode(body, charset), body.decode())
+                self.assertLess(time.perf_counter() - start, 1.0)
+        for charset, text in [("utf-8", "naïve ✓"), ("windows-1252", "café"), ("ISO-8859-1", "café"), ("shift_jis", "日本"),
+                              ("gb18030", "中文"), ("euc-kr", "한국"), ("tis-620", b"\xe4\xb7\xc2".decode("tis-620")),
+                              ("utf-16", "x")]:
+            with self.subTest(charset=charset):
+                self.assertEqual(net._decode(text.encode(charset), charset), text)
 
 
 class CatchUpTests(unittest.TestCase):

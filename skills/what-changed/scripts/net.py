@@ -46,10 +46,18 @@ def _context(use_system_ca: bool) -> ssl.SSLContext:
     return ssl.create_default_context()
 
 
+# Charsets a web page is written in. Any other codec Python knows (punycode, idna, utf-7,
+# unicode_escape, base64, ...) is not page text, and some decode in quadratic time: use utf-8.
+PAGE_CHARSET = re.compile(r"utf-8-sig|utf-(?:8|16|32)(?:-[lb]e)?|ascii|iso8859-\d+|cp\d+|mac-[a-z0-9]+|koi8-[a-z]|kz1048|ptcp154"
+                          r"|hp-roman8|tis-620|shift_jis\w*|euc_\w+|gb2312|gbk|gb18030|big5\w*|hz|johab|iso2022_\w+")
+
+
 def _decode(data: bytes, charset: str) -> str:
     try:
-        codecs.lookup(charset)
+        charset = codecs.lookup(charset).name
     except LookupError:
+        charset = "utf-8"
+    if not PAGE_CHARSET.fullmatch(charset):
         charset = "utf-8"
     return data.decode(charset, errors="replace")
 

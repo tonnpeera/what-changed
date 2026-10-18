@@ -184,7 +184,11 @@ def topic_status(topic: dict, store: Path, today: date, timeout: float) -> tuple
     stored = {m.group(1): m.group(2) for m in SOURCE_STATE.finditer(ledger_path.read_text(encoding="utf-8", errors="replace"))}
     lines, failed = [], []
     for url in topic.get("sources", []):
-        r = fingerprint(url, timeout)
+        try:
+            r = fingerprint(url, timeout)
+        except Exception as e:  # one page's content must not stop the other topics
+            failed.append((url, f"fingerprint error: {type(e).__name__}"))
+            continue
         if not r["ok"]:
             failed.append((url, r["detail"]))
             continue

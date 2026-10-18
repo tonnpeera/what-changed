@@ -83,3 +83,8 @@ jobs:
         run: |
           echo "precheck could not fetch any source of a due topic; see today's digest (Could not check)."
           exit 1
+      - name: Fail if precheck stopped with an error
+        if: steps.precheck.outputs.code != '0' && steps.precheck.outputs.code != '10' && steps.precheck.outputs.code != '2' && steps.precheck.outputs.code != '11'
+        run: |
+          echo "precheck exited with code ${{ steps.precheck.outputs.code }}; see its output above. Today is not counted as done."
+          exit 1

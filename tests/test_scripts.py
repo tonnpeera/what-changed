@@ -494,17 +494,20 @@ class CatchUpTests(unittest.TestCase):
 
     def test_a_scheduler_without_an_approved_copy_gets_the_approval_note(self):
         """A scheduler has started for the project (its state folder exists) but nothing is approved
-        yet: the note gives the approve step for this version, not a run offer."""
+        yet: the note gives the approve step for this version, not a run offer. The version is named
+        by the hash of the file's bytes, as shasum and Get-FileHash give it: on Windows, text mode
+        writes CRLF line ends, so the hash of the text with LF line ends would name another version."""
         with tempfile.TemporaryDirectory() as d:
             store, xdg = Path(d) / "project" / "uptodate", Path(d) / "state"
             store.mkdir(parents=True)
-            (store / "topics.yaml").write_text(TOPICS, encoding="utf-8")
+            (store / "topics.yaml").write_text(TOPICS, encoding="utf-8", newline="\r\n")  # as Windows writes it
             with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(xdg), "WHAT_CHANGED_AUTORUN": "1"}):
                 self.assertIn("Before anything else", self.run_catch_up(store), "no scheduler here: unchanged")
                 catch_up.state_base(store).mkdir(parents=True)
                 (store / ".catchup-notified").unlink()
                 note = self.run_catch_up(store)
-        sha = __import__("hashlib").sha256(TOPICS.encode()).hexdigest()[:32]
+        sha = __import__("hashlib").sha256(TOPICS.replace("\n", "\r\n").encode()).hexdigest()[:32]
+        self.assertNotEqual(sha, __import__("hashlib").sha256(TOPICS.encode()).hexdigest()[:32])
         self.assertIn("topics.yaml has not been approved for scheduled runs yet", note)
         self.assertIn(f"WHAT_CHANGED_APPROVE_TOPICS={sha} (Windows: -ApproveTopics {sha})", note)
         self.assertIn("Do not run what-changed", note)
@@ -1686,7 +1689,7 @@ class SchedulerSecurityTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state.parent)}):
             self.assertIn(cmd, catch_up.scheduler_error(store, date.today().isoformat()))
 
-        full = hashlib.sha256(TOPICS.encode()).hexdigest()  # what setup passes: the SHA-256 of topics.yaml
+        full = hashlib.sha256((store / "topics.yaml").read_bytes()).hexdigest()  # what setup passes: the file's SHA-256
         r, lines, _t, store, _s = self.run_daily_with_fake_claude({"WHAT_CHANGED_APPROVE_TOPICS": full}, prepare=used, approve=False)
         state = store.parent.parent / "home" / ".local" / "state" / "what-changed"
         self.assertEqual(r.returncode, 0, r.stderr)

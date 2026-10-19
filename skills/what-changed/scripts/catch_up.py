@@ -96,9 +96,22 @@ def scheduler_error(store: Path, today: str) -> str | None:
     return text[:1000 if text.startswith(TOPICS_APPROVAL) else 400]
 
 
+def scheduler_used(store: Path) -> bool:
+    """A scheduler has started for this project, or its approve step ran (both make this folder)."""
+    return state_base(store).is_dir()
+
+
+def topics_hash(store: Path) -> str | None:
+    """The 32 hash characters that name the current topics.yaml in the schedulers' approve step."""
+    try:
+        return hashlib.sha256((store / "topics.yaml").read_bytes()).hexdigest()[:32]
+    except OSError:
+        return None
+
+
 def topics_approved(store: Path) -> bool | None:
     """Whether topics.yaml is the copy approved for scheduled runs (None: there is no approved copy,
-    so no scheduler has approved one here, or topics.yaml cannot be read)."""
+    or topics.yaml cannot be read)."""
     approved = state_base(store).with_name(state_base(store).name + ".topics.yaml")
     try:
         return approved.read_bytes() == (store / "topics.yaml").read_bytes()
@@ -107,7 +120,8 @@ def topics_approved(store: Path) -> bool | None:
 
 
 def message(store: Path, last: str | None, autorun: bool, error: str | None = None,
-            approved: bool | None = None, full_text: Path | None = None) -> str:
+            approved: bool | None = None, full_text: Path | None = None,
+            scheduler: bool = False, version: str | None = None) -> str:
     when = f"last run {last}" if last else "no run recorded yet"
     stopped = bool(error and error.startswith(TOPICS_APPROVAL))
     if stopped and approved:
@@ -116,11 +130,17 @@ def message(store: Path, last: str | None, autorun: bool, error: str | None = No
         error = None  # changed again after that approval
     if error:
         when += f"; the scheduled run reported: {error}"
+    first = approved is None and scheduler and not stopped and version is not None
     if approved is False and not stopped:
         when += "; topics.yaml changed since it was approved for scheduled runs"
-    if stopped or approved is False:
+    if first:
+        when += "; topics.yaml has not been approved for scheduled runs yet"
+    if stopped or approved is False or first:
         # Its sources may come from an agent: no run, until the user has looked at them.
         where = f" (the full message is in {full_text})" if stopped and full_text else ""
+        if not stopped and version:
+            where = (f": the scheduler's approve step with WHAT_CHANGED_APPROVE_TOPICS={version} "
+                     f"(Windows: -ApproveTopics {version}), set up like its timer")
         action = ("At the start of your first reply, tell the user in one line that the daily run is stopped until "
                   "they review topics.yaml and approve it with the scheduler's command" + where + " (running the "
                   "scheduler by hand also prints it). Do not run what-changed, do not run that command yourself "
@@ -169,7 +189,8 @@ def main() -> int:
     except OSError:
         error = None
     autorun = os.environ.get("WHAT_CHANGED_AUTORUN") == "1"
-    print(render(message(store, last, autorun, error, topics_approved(store), error_file(store, today)), args.format))
+    print(render(message(store, last, autorun, error, topics_approved(store), error_file(store, today),
+                         scheduler_used(store), topics_hash(store)), args.format))
     # The hook runs outside any sandbox: never write through a link an agent planted in the store.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     try:

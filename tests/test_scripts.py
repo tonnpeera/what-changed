@@ -492,6 +492,24 @@ class CatchUpTests(unittest.TestCase):
         self.assertNotIn("approved since", again)
         self.assertIn("changed since it was approved", again)
 
+    def test_a_scheduler_without_an_approved_copy_gets_the_approval_note(self):
+        """A scheduler has started for the project (its state folder exists) but nothing is approved
+        yet: the note gives the approve step for this version, not a run offer."""
+        with tempfile.TemporaryDirectory() as d:
+            store, xdg = Path(d) / "project" / "uptodate", Path(d) / "state"
+            store.mkdir(parents=True)
+            (store / "topics.yaml").write_text(TOPICS, encoding="utf-8")
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(xdg), "WHAT_CHANGED_AUTORUN": "1"}):
+                self.assertIn("Before anything else", self.run_catch_up(store), "no scheduler here: unchanged")
+                catch_up.state_base(store).mkdir(parents=True)
+                (store / ".catchup-notified").unlink()
+                note = self.run_catch_up(store)
+        sha = __import__("hashlib").sha256(TOPICS.encode()).hexdigest()[:32]
+        self.assertIn("topics.yaml has not been approved for scheduled runs yet", note)
+        self.assertIn(f"WHAT_CHANGED_APPROVE_TOPICS={sha} (Windows: -ApproveTopics {sha})", note)
+        self.assertIn("Do not run what-changed", note)
+        self.assertNotIn("Before anything else", note)
+
     def test_autorun_changes_the_request(self):
         with mock.patch.dict(os.environ, {"WHAT_CHANGED_AUTORUN": "1"}):
             self.assertIn("Before anything else", catch_up.message(Path("s"), None, True))
@@ -1569,9 +1587,8 @@ class SchedulerSecurityTests(unittest.TestCase):
         import re
         planted = "https://attacker.example/x?leak=1"
         r, lines, tools, store, skill = self.run_daily_with_fake_claude(
-            {"WHAT_CHANGED_HOST": "codex", "FAKE_ADD_SOURCE": planted}, approve=False)
+            {"WHAT_CHANGED_HOST": "codex", "FAKE_ADD_SOURCE": planted})
         root, state = store.parent.parent, store.parent.parent / "home" / ".local" / "state" / "what-changed"
-        self.assertIn("(first scheduled run for this project, as it was then); scheduled runs fetch only from: example.com", r.stdout)
         self.assertIn(planted, (store / "topics.yaml").read_text(encoding="utf-8"), "the stand-in agent ran")
         self.assertEqual(r.returncode, 7, r.stderr)
         self.assertIn("topics.yaml needs your approval: the agent changed it", r.stderr)
@@ -1624,9 +1641,8 @@ class SchedulerSecurityTests(unittest.TestCase):
         self.assertEqual(lines, [], "approving does not start a run")
         self.assertIn("approved since", note())
         log = (state / f"{logdir.name}.approvals.log").read_text(encoding="utf-8").splitlines()
-        self.assertEqual(len(log), 2)
-        self.assertIn("(first scheduled run for this project, as it was then)", log[0])
-        self.assertIn(f"approved topics.yaml {sha} (by you); scheduled runs fetch only from: attacker.example,example.com", log[1])
+        self.assertEqual(len(log), 1)
+        self.assertIn(f"approved topics.yaml {sha} (by you); scheduled runs fetch only from: attacker.example,example.com", log[0])
         self.assertIn("Before anything else", note(), "approved: the stopped day can be run now")
 
         r, lines, tools, *_ = self.run_daily_with_fake_claude(root=root)
@@ -1648,40 +1664,51 @@ class SchedulerSecurityTests(unittest.TestCase):
         self.assertIn("today's run already finished", r.stdout)
 
     @POSIX_ONLY
-    def test_the_first_scheduled_run_approves_and_an_update_asks_once(self):
-        """The README order (add a topic and run it, then set up the scheduler) leaves a used store:
-        the first scheduled run for the project still approves it. A scheduler that has run here
-        before but has no approved copy (an update from a version without approvals) stops once."""
+    def test_no_scheduled_run_approves_topics_yaml_by_itself(self):
+        """The README order (add a topic and run it, then set up the scheduler) leaves a used store.
+        With no approved copy, the first scheduled run stops and names the hosts and the command, as
+        it does after an update from a version without approvals. The approval at setup (the approve
+        step, run as the skill's setup runs it) lets the first scheduled run go on."""
+        import hashlib
         import re
         def used(store):
             (store / "runs.log").write_text("2026-10-01T07:00:00+00:00\tscope=all\n", encoding="utf-8")
             (store / "ledger").mkdir()
             (store / "ledger" / "demo.md").write_text("# demo\n", encoding="utf-8")
         r, lines, _t, store, _s = self.run_daily_with_fake_claude(prepare=used, approve=False)
-        self.assertIn("(first scheduled run for this project, as it was then); scheduled runs fetch only from: example.com", r.stdout)
-        self.assertNotIn("needs your approval", r.stderr)
-        self.assertNotEqual(lines, [], "the run went on")
-
-        root, state = store.parent.parent, store.parent.parent / "home" / ".local" / "state" / "what-changed"
-        [approved] = state.glob("*.topics.yaml")
-        approved.unlink()
-        (state / f"{approved.name[:16]}.last-run").write_text("2026-10-01\n", encoding="utf-8")
-        r, lines, *_ = self.run_daily_with_fake_claude(root=root)
+        state = store.parent.parent / "home" / ".local" / "state" / "what-changed"
         self.assertEqual(r.returncode, 7, r.stderr)
-        self.assertIn("this scheduler has run for this project before (the first run after an update", r.stderr)
-        self.assertNotIn("a new machine", r.stderr)
-        self.assertEqual(lines, [])
+        self.assertIn("topics.yaml needs your approval: it has not been approved for scheduled runs yet", r.stderr)
+        self.assertIn("hosts not approved before: example.com;", r.stderr)
+        self.assertEqual(lines, [], "the agent must not start")
+        self.assertEqual(list(state.glob("*.topics.yaml")) + list(state.glob("*.approvals.log")), [], "nothing approved")
         cmd = re.search(r"approve this version with: (.*?) \(", r.stderr).group(1)
         with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state.parent)}):
             self.assertIn(cmd, catch_up.scheduler_error(store, date.today().isoformat()))
 
+        full = hashlib.sha256(TOPICS.encode()).hexdigest()  # what setup passes: the SHA-256 of topics.yaml
+        r, lines, _t, store, _s = self.run_daily_with_fake_claude({"WHAT_CHANGED_APPROVE_TOPICS": full}, prepare=used, approve=False)
+        state = store.parent.parent / "home" / ".local" / "state" / "what-changed"
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"approved topics.yaml {full[:32]} (by you); scheduled runs fetch only from: example.com", r.stdout)
+        self.assertEqual(lines, [], "approving does not start a run")
+        [log] = state.glob("*.approvals.log")
+        self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1)
+        r, lines, *_ = self.run_daily_with_fake_claude(root=store.parent.parent)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("needs your approval", r.stderr)
+        self.assertNotEqual(lines, [], "the first scheduled run went on")
+        self.assertEqual(len(log.read_text(encoding="utf-8").splitlines()), 1, "the run approved nothing itself")
+
     @POSIX_ONLY
     def test_a_watchlist_precheck_cannot_read_is_not_approved_silently(self):
         """Every approval leaves a line in approvals.log, or the run leaves one in the error file."""
+        import hashlib
+        flow = TOPICS.replace("    sources:\n      - https://example.com/CHANGELOG.md\n", "    sources: [https://example.com/CHANGELOG.md]\n")
         def flow_style(store):
-            (store / "topics.yaml").write_text(TOPICS.replace("    sources:\n      - https://example.com/CHANGELOG.md\n",
-                                                              "    sources: [https://example.com/CHANGELOG.md]\n"), encoding="utf-8")
-        r, lines, _t, store, _s = self.run_daily_with_fake_claude(prepare=flow_style, approve=False)
+            (store / "topics.yaml").write_text(flow, encoding="utf-8")
+        r, lines, _t, store, _s = self.run_daily_with_fake_claude(
+            {"WHAT_CHANGED_APPROVE_TOPICS": hashlib.sha256(flow.encode()).hexdigest()}, prepare=flow_style, approve=False)
         state = store.parent.parent / "home" / ".local" / "state" / "what-changed"
         self.assertIn("sources: [", (store / "topics.yaml").read_text(encoding="utf-8"))
         self.assertEqual(r.returncode, 2, r.stderr)
@@ -1699,15 +1726,12 @@ class SchedulerSecurityTests(unittest.TestCase):
         import subprocess
         xdg = {"XDG_STATE_HOME": tempfile.mkdtemp()}
         self.addCleanup(__import__("shutil").rmtree, xdg["XDG_STATE_HOME"], True)
-        r, lines, _t, store, _s = self.run_daily_with_fake_claude(xdg, approve=False)
-        self.assertIn("first scheduled run for this project", r.stdout)
+        def with_ip(store):
+            (store / "topics.yaml").write_text(TOPICS.replace("    sources:\n", "    sources:\n      - http://93.184.216.34/feed\n"), encoding="utf-8")
+        r, lines, _t, store, _s = self.run_daily_with_fake_claude(xdg, prepare=with_ip, approve=False)
         root = store.parent.parent
-        (store / "topics.yaml").write_text(TOPICS.replace("    sources:\n", "    sources:\n      - http://93.184.216.34/feed\n"), encoding="utf-8")
-        (Path(xdg["XDG_STATE_HOME"]) / "what-changed").joinpath(
-            f"{__import__('hashlib').sha256(str(store.parent).encode()).hexdigest()[:16]}.last-run").unlink()
-        r, lines, *_ = self.run_daily_with_fake_claude(xdg, root=root)
         self.assertEqual(r.returncode, 7, r.stderr)
-        self.assertIn("hosts not approved before: 93.184.216.34;", r.stderr, "an IP-literal source is named too")
+        self.assertIn("hosts not approved before: 93.184.216.34, example.com;", r.stderr, "an IP-literal source is named too")
         cmd = re.search(r"approve this version with: (.*?) \(", r.stderr).group(1)
         self.assertIn("XDG_STATE_HOME=", cmd)
         a = subprocess.run(["bash", "-c", cmd], env={"PATH": "/usr/bin:/bin", "HOME": str(root / "home")},

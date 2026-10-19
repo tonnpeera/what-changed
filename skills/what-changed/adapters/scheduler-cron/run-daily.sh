@@ -9,9 +9,9 @@
 #   WHAT_CHANGED_CLAUDE=/path/to/claude           claude host: which claude to run (optional; default:
 #                                                 ~/.local/bin/claude, where the installer puts it, else PATH)
 #   WHAT_CHANGED_VERSION_TIMEOUT=30               claude host: seconds `claude --version` may take (optional)
-#   WHAT_CHANGED_APPROVE_TOPICS=<32 characters>   approve the topics.yaml you reviewed, then exit (the first
-#                                                 scheduled run approves it as it is; later runs stop while it
-#                                                 differs from the approved copy, and the stop message shows
+#   WHAT_CHANGED_APPROVE_TOPICS=<32 characters>   approve the topics.yaml you reviewed, then exit (do it once
+#                                                 at setup; runs stop while there is no approved copy or
+#                                                 topics.yaml differs from it, and the stop message shows
 #                                                 what changed and the exact command)
 #
 # Exits early once it has completed a run today (its own record under ~/.local/state/what-changed/,
@@ -144,16 +144,9 @@ read_topics_hash() {
   [ -f "$TOPICS" ] || fail "there is no topics.yaml file in $STORE; add a topic first" 2
   TOPICS_HASH="$(sha_of "$TOPICS")" || fail "cannot read $TOPICS" 7
 }
-ran_before() {  # this scheduler has run precheck for this project before (a completed day, or its logs)
-  [ -e "$DONE" ] && return 0
-  for f in "$LOGDIR"/*.out; do [ -e "$f" ] && return 0; done
-  return 1
-}
 topics_reason() {  # why the scheduled steps cannot use topics.yaml as it is now (prints nothing if they can)
   if [ ! -f "$APPROVED" ]; then
-    if ran_before; then
-      echo "there is no approved copy of it, but this scheduler has run for this project before (the first run after an update that added this step, or the copy was removed)"
-    fi
+    echo "it has not been approved for scheduled runs yet (setup does this once, with you; an update from a version before 0.1.6, a moved project or a removed copy also leave none)"
   elif [ "$(sha_of "$APPROVED")" != "$TOPICS_HASH" ]; then
     echo "it changed since you approved it"
   fi
@@ -264,13 +257,9 @@ if [ "$HOST" = claude ]; then
   fi
 fi
 
-# The first scheduled run for this project approves topics.yaml as it is then (you have just set it
-# up; the hosts it will fetch from are printed). After that, a change needs your approval, and so does
-# a missing copy once this scheduler has run here (an update that added this step, or a removed copy).
+# No scheduled run approves topics.yaml by itself: you approve it once at setup (the skill's setup
+# shows you the hosts first), and again after each change.
 read_topics_hash
-if [ ! -f "$APPROVED" ] && ! ran_before; then
-  approve "first scheduled run for this project, as it was then"
-fi
 WHY="$(topics_reason)"
 if [ -n "$WHY" ]; then topics_stop "$WHY"; fi
 

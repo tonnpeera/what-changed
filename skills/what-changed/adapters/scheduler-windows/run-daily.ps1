@@ -10,9 +10,9 @@ Schedule it with Task Scheduler (see ../README.md). Not tested on Windows yet; i
                  default: %USERPROFILE%\.local\bin\claude.exe, else the first claude on PATH)
   -Python        Python 3.11 or later (optional; or set WHAT_CHANGED_PYTHON; default: py -3, then python)
   -ApproveTopics approve the topics.yaml you reviewed, named by the first 32 characters of its hash,
-                 then exit. The first scheduled run approves it as it is; later runs stop while
-                 it differs from the approved copy, and the stop message shows what changed and
-                 the exact command.
+                 then exit. Do it once at setup; runs stop while there is no approved copy or
+                 topics.yaml differs from it, and the stop message shows what changed and the
+                 exact command.
 
 How it differs from run-daily.sh: the agent gets no shell at all. This script runs the skill's
 scripts itself: precheck.py and fingerprint.py before the agent (the fingerprints go into the
@@ -103,13 +103,9 @@ function Test-Changed {  # the approved copy differs from topics.yaml, or cannot
   try { return (Get-FileHash -LiteralPath $Approved -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower() -ne $TopicsHash }
   catch { return $true }
 }
-function Test-RanBefore {  # this scheduler has run precheck for this project before (a completed day, or its logs)
-  (Test-Path -LiteralPath $Done) -or @(Get-ChildItem -LiteralPath $LogDir -Filter '*.out' -File -ErrorAction SilentlyContinue).Count -gt 0
-}
 function Get-TopicsReason {  # why the scheduled steps cannot use topics.yaml as it is now ('' if they can)
   if (-not (Test-Path -LiteralPath $Approved -PathType Leaf)) {
-    if (Test-RanBefore) { return 'there is no approved copy of it, but this scheduler has run for this project before (the first run after an update that added this step, or the copy was removed)' }
-    return ''
+    return 'it has not been approved for scheduled runs yet (setup does this once, with you; an update from a version before 0.1.6, a moved project or a removed copy also leave none)'
   }
   if (Test-Changed) { return 'it changed since you approved it' }
   return ''
@@ -214,13 +210,9 @@ $VersionLine = if ($VersionOut.Count -gt 0) { $VersionOut[0] } else { 'cli_versi
 if ($VersionCode -eq 4) { Stop-Run "$VersionLine; try again later, or raise WHAT_CHANGED_VERSION_TIMEOUT" 3 }
 if ($VersionCode -ne 0) { Stop-Run "$VersionLine; unattended runs use --restricted. Update Claude Code, or set -Claude to another claude" 3 }
 
-# The first scheduled run for this project approves topics.yaml as it is then (you have just set it
-# up; the hosts it will fetch from are printed). After that, a change needs your approval, and so does
-# a missing copy once this scheduler has run here (an update that added this step, or a removed copy).
+# No scheduled run approves topics.yaml by itself: you approve it once at setup (the skill's setup
+# shows you the hosts first), and again after each change.
 Read-TopicsHash
-if (-not (Test-Path -LiteralPath $Approved -PathType Leaf) -and -not (Test-RanBefore)) {
-  Approve-Topics 'first scheduled run for this project, as it was then'
-}
 $Why = Get-TopicsReason
 if ($Why) { Stop-Run (Get-ApprovalNote $Why) 7 }
 
